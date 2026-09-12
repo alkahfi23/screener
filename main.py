@@ -18,7 +18,7 @@ app.add_middleware(
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CHAINS = {"ethereum", "base", "solana", "bsc", "arbitrum", "avalanche"}
+CHAINS = {"ethereum", "base", "solana", "bsc", "arbitrum", "avalanche", "robinhood"}
 
 JUNK_SYMBOLS = {
     "ETH", "WETH", "BTC", "WBTC", "SOL", "WSOL", "BNB", "WBNB", "BSC",
@@ -37,6 +37,7 @@ GOPLUS_CHAIN = {
     "arbitrum": "42161",
     "base": "8453",
     "avalanche": "43114",
+    "robinhood": "4663",
 }
 
 SESSION = requests.Session()
@@ -300,6 +301,21 @@ def enrich(p: Dict, is_breakout: bool = False) -> Dict:
     except (TypeError, ValueError):
         mcap = 0
     age = pair_age_hours(p)
+    info = p.get("info") or {}
+    icon = info.get("imageUrl") or info.get("icon") or ""
+    socials = []
+    for s in (info.get("socials") or []):
+        if isinstance(s, dict) and s.get("url"):
+            socials.append({
+                "type": (s.get("type") or s.get("platform") or "social"),
+                "url": s.get("url"),
+            })
+    websites = []
+    for w in (info.get("websites") or []):
+        if isinstance(w, dict) and w.get("url"):
+            websites.append(w.get("url"))
+        elif isinstance(w, str):
+            websites.append(w)
     return {
         "symbol": base.get("symbol") or "UNKNOWN",
         "name": base.get("name") or "",
@@ -322,6 +338,9 @@ def enrich(p: Dict, is_breakout: bool = False) -> Dict:
         "url": p.get("url") or "",
         "upside": "UNRATED",
         "upside_note": "",
+        "icon": icon,
+        "socials": socials,
+        "websites": websites,
     }
 
 
@@ -667,14 +686,19 @@ def is_green_signal(row: Dict) -> bool:
     return True
 
 
-def send_telegram(text: str) -> bool:
+def send_telegram(text: str, parse_mode: str = "HTML") -> bool:
     if not TG_TOKEN or not TG_CHAT:
         print("telegram skip: token/chat_id kosong")
         return False
     try:
         r = SESSION.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT, "text": text, "disable_web_page_preview": True},
+            json={
+                "chat_id": TG_CHAT,
+                "text": text,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": False,
+            },
             timeout=20,
         )
         r.raise_for_status()
@@ -684,18 +708,87 @@ def send_telegram(text: str) -> bool:
         return False
 
 
+def send_telegram_photo(photo_url: str, caption: str) -> bool:
+    if not TG_TOKEN or not TG_CHAT:
+        return False
+    try:
+        r = SESSION.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+            json={
+                "chat_id": TG_CHAT,
+                "photo": photo_url,
+                "caption": caption[:1024],
+                "parse_mode": "HTML",
+            },
+            timeout=25,
+        )
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        print("telegram photo error:", e)
+        return False
+
+
+def _usd(n) -> str:
+    try:
+        x = float(n or 0)
+    except (TypeError, ValueError):
+        return "-"
+    if x >= 1_000_000:
+        return f"${x/1_000_000:.2f}M"
+    if x >= 1_000:
+        return f"${x/1_000:.1f}K"
+    return f"${x:,.0f}"
+
+
+def dex_url(row: Dict) -> str:
+    if row.get("url"):
+        return row["url"]
+    chain = str(row.get("chain") or "").lower()
+    pair = row.get("pair_address") or ""
+    if chain and pair:
+        return f"https://dexscreener.com/{chain}/{pair}"
+    return ""
+
+
 def format_alert(row: Dict) -> str:
-    url = row.get("url") or ""
-    if not url and row.get("pair_address") and row.get("chain"):
-        url = f"https://dexscreener.com/{str(row.get('chain')).lower()}/{row.get('pair_address')}"
+    symbol = row.get("symbol") or "?"
+    name = row.get("name") or ""
+    chain = row.get("chain") or "-"
+    addr = row.get("token_address") or "-"
+    link = dex_url(row)
+    social_lines = []
+    for s in (row.get("socials") or [])[:6]:
+        kind = str(s.get("type") or "social").capitalize()
+        social_lines.append(f"• {kind}: {s.get('url')}")
+    for w in (row.get("websites") or [])[:3]:
+        social_lines.append(f"• Web: {w}")
+    social_block = "\n".join(social_lines) if social_lines else "• sosial: tidak ada di DexScreener"
+
+    title = f"<b>{symbol}</b>"
+    if name:
+        title += f" — {name}"
     return (
-        "EARLY GEM (GREEN FILTER)\n"
-        f"{row.get('symbol')} | {row.get('chain')}\n"
-        f"score {row.get('score')} | conf {row.get('confidence')}\n"
-        f"risk {row.get('risk')} | upside {row.get('upside')}\n"
-        f"liq ${row.get('liquidity_usd')} | mcap ${row.get('market_cap')} | vol ${row.get('volume_24h')}\n"
-        f"{url}"
+        "🟢 <b>EARLY GEM · GREEN FILTER</b>\n"
+        f"{title}\n"
+        f"⛓ {chain} · {row.get('dex') or '-'}\n\n"
+        f"⭐ score <b>{row.get('score')}</b> · conf <b>{row.get('confidence')}</b>\n"
+        f"🛡 risk <b>{row.get('risk')}</b> · upside <b>{row.get('upside')}</b>\n"
+        f"💧 liq {_usd(row.get('liquidity_usd'))} · 🧢 mcap {_usd(row.get('market_cap'))}\n"
+        f"📊 vol 24h {_usd(row.get('volume_24h'))}\n"
+        f"📈 24h {row.get('price_change_24h')}%\n\n"
+        f"<b>Contract</b>\n<code>{addr}</code>\n\n"
+        f"<b>Social</b>\n{social_block}\n\n"
+        f"DexScreener: {link}"
     )
+
+
+def notify_token(row: Dict) -> bool:
+    caption = format_alert(row)
+    icon = row.get("icon") or ""
+    if icon and send_telegram_photo(icon, caption):
+        return True
+    return send_telegram(caption)
 
 
 def run_alert_pass() -> Dict:
@@ -709,7 +802,7 @@ def run_alert_pass() -> Dict:
         last = SENT_ALERTS.get(key, 0)
         if now - last < 6 * 3600:
             continue
-        if send_telegram(format_alert(row)):
+        if notify_token(row):
             SENT_ALERTS[key] = now
             sent += 1
     return {"checked": len(rows), "sent": sent}
