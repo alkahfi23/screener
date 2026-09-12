@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: gem-scanner
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ENABLE_TELEGRAM
+        value: "1"
+      - key: ALERT_MIN_SCORE
+        value: "70"
+      - key: ALERT_MIN_CONF
+        value: "70"
+      - key: ALERT_INTERVAL_SEC
+        value: "180"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

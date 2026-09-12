@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Hybrid Early Gem Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+body {
+  margin: 0;
+  font-family: Inter, system-ui, Arial;
+  background: radial-gradient(circle at top, #0f172a, #020617);
+  color: #e5e7eb;
+}
+.container { max-width: 1280px; margin: auto; padding: 24px; }
+h1 { color: #38bdf8; margin-bottom: 16px; }
+.controls { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+button, select {
+  background: #0b1220; color: #e5e7eb; border: 1px solid #1e293b;
+  padding: 10px 14px; border-radius: 8px; cursor: pointer;
+}
+button.primary { background: #22c55e; color: #052e16; font-weight: 600; }
+button.active { background: #38bdf8; color: #020617; font-weight: 600; }
+.status { margin: 10px 0 12px; color: #22c55e; }
+.legend {
+  display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;
+  font-size: 12px; color: #94a3b8;
+}
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 40px; }
+th, td { padding: 10px 8px; border-bottom: 1px solid #1e293b; text-align: left; vertical-align: top; }
+th { color: #94a3b8; font-weight: 600; font-size: 12px; }
+.symbol a { color: #38bdf8; text-decoration: none; font-weight: 600; }
+.muted { color: #94a3b8; font-size: 12px; }
+.section-title { margin: 20px 0 10px; font-size: 20px; color: #38bdf8; }
+.badge {
+  display: inline-block; padding: 3px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; letter-spacing: .02em;
+}
+.safe { background: #052e16; color: #4ade80; }
+.warn { background: #3b2a05; color: #fbbf24; }
+.danger { background: #3f1010; color: #f87171; }
+.unknown { background: #1e293b; color: #94a3b8; }
+.row-danger { background: rgba(239, 68, 68, .08); }
+.row-warn { background: rgba(245, 158, 11, .07); }
+.row-safe { background: rgba(34, 197, 94, .05); }
+.flags { margin-top: 4px; color: #f87171; font-size: 11px; }
+.flow-acc { color: #22c55e; font-weight: 600; }
+.flow-dist { color: #ef4444; font-weight: 600; }
+.flow-neutral { color: #9ca3af; }
+.confidence { font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Hybrid Early Gem Dashboard</h1>
+  <div class="controls">
+    <button class="primary" onclick="refreshData()">Refresh</button>
+    <select id="mode" onchange="refreshData()">
+      <option value="balanced">Balanced</option>
+      <option value="strict">Strict</option>
+      <option value="aggressive">Aggressive</option>
+    </select>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#94a3b8;">
+      <input type="checkbox" id="hideDanger" onchange="refreshData()" />
+      Sembunyikan honeypot / red flag
+    </label>
+    <button id="btnDiscovery" class="active" onclick="setView('discovery')">Discovery</button>
+    <button id="btnBreakout" onclick="setView('breakout')">Breakout</button>
+  </div>
+  <div class="legend">
+    <span><span class="badge safe">SAFE FILTER</span> risk LOW, bukan honeypot</span>
+    <span><span class="badge warn">CAUTION</span> HIGH risk / tax / flag</span>
+    <span><span class="badge danger">RED FLAG</span> honeypot / cannot sell</span>
+    <span><span class="badge unknown">UNKNOWN</span> checker belum yakin</span>
+    <span><span class="badge safe">HIGH ROOM</span> mcap kecil + liq/vol waras — spekulatif</span>
+  </div>
+  <div id="status" class="status">Ready</div>
+  <div class="section-title" id="sectionTitle">Discovery – Early Gems</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Status</th>
+        <th>Upside</th>
+        <th>Symbol</th>
+        <th>Chain</th>
+        <th>Score</th>
+        <th>Confidence</th>
+        <th>Verdict</th>
+        <th>Whale</th>
+        <th>Pressure</th>
+        <th>Flow</th>
+        <th>Risk</th>
+        <th>Tax</th>
+        <th>Liquidity</th>
+        <th>Market Cap</th>
+        <th>Volume 24h</th>
+      </tr>
+    </thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+</div>
+<script>
+let currentView = "discovery";
+
+function chainOf(item) {
+  return (item.chain || item.sector || "").toString();
+}
+function dexUrl(item) {
+  if (item.url) return item.url;
+  const chain = chainOf(item).toLowerCase();
+  const pair = item.pair_address || "";
+  if (chain && pair) return "https://dexscreener.com/" + chain + "/" + pair;
+  return "#";
+}
+function setView(view) {
+  currentView = view;
+  document.getElementById("btnDiscovery").classList.toggle("active", view === "discovery");
+  document.getElementById("btnBreakout").classList.toggle("active", view === "breakout");
+  document.getElementById("sectionTitle").innerText =
+    view === "discovery" ? "Discovery – Early Gems" : "Breakout – Revival / Momentum";
+  refreshData();
+}
+function flowClass(flow) {
+  if (!flow) return "flow-neutral";
+  if (flow.includes("ACCUMULATION")) return "flow-acc";
+  if (flow.includes("DISTRIBUTION")) return "flow-dist";
+  return "flow-neutral";
+}
+function money(n) { return "$" + Number(n || 0).toLocaleString(); }
+function upsideClass(label) {
+  const u = String(label || "").toUpperCase();
+  if (u === "HIGH ROOM") return "safe";
+  if (u === "SPECULATIVE" || u === "MODERATE") return "warn";
+  if (u === "NO UPSIDE" || u === "WASHY" || u === "THIN") return "danger";
+  return "unknown";
+}
+
+function classify(item) {
+  const flags = (item.flags || []).map(String);
+  const hard = item.honeypot === true || item.risk === "HONEYPOT" ||
+    flags.some(f => /HONEYPOT|CANNOT_SELL|CANNOT_BUY|BLACKLIST|RUGGED/i.test(f));
+  const caution = item.risk === "HIGH" || Number(item.sell_tax || 0) >= 10 || Number(item.buy_tax || 0) >= 10 ||
+    flags.some(f => /HIGH_TAX|HIDDEN_OWNER|MINT_AUTH|FREEZE_AUTH|PROXY/i.test(f));
+  if (hard) return { key: "danger", label: "RED FLAG", row: "row-danger" };
+  if (item.risk === "UNKNOWN" || flags.includes("CHECK_FAILED") || flags.includes("NO_DATA")) {
+    return { key: "unknown", label: "UNKNOWN", row: "" };
+  }
+  if (caution) return { key: "warn", label: "CAUTION", row: "row-warn" };
+  return { key: "safe", label: "SAFE FILTER", row: "row-safe" };
+}
+
+async function refreshData() {
+  const status = document.getElementById("status");
+  const table = document.getElementById("tableBody");
+  const hideDanger = document.getElementById("hideDanger").checked;
+  table.innerHTML = "";
+  status.innerText = "Fetching data...";
+  const url = currentView === "discovery"
+    ? "/scan/top?limit=20&mode=" + document.getElementById("mode").value
+    : "/scan/breakout?limit=20";
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length === 0) {
+      status.innerText = "No data found. Coba mode Aggressive.";
+      return;
+    }
+    const rank = (item) => {
+      const c = classify(item);
+      const up = String(item.upside || "").toUpperCase();
+      const upRank = ({ "HIGH ROOM": 0, "SPECULATIVE": 1, "MODERATE": 2 })[up] ?? 9;
+      const tier = ({ safe: 0, unknown: 1, warn: 2, danger: 3 })[c.key] ?? 4;
+      return [tier, upRank, -(item.confidence || 0)];
+    };
+    data.sort((a, b) => {
+      const A = rank(a), B = rank(b);
+      for (let i = 0; i < A.length; i++) if (A[i] !== B[i]) return A[i] - B[i];
+      return 0;
+    });
+    let shown = 0;
+    data.forEach(item => {
+      const cls = classify(item);
+      if (hideDanger && cls.key === "danger") return;
+      shown += 1;
+      const tr = document.createElement("tr");
+      tr.className = cls.row;
+      tr.innerHTML = `
+        <td><span class="badge ${cls.key}">${cls.label}</span></td>
+        <td><span class="badge ${upsideClass(item.upside)}">${item.upside || "UNRATED"}</span><div class="muted">${item.upside_note || ""}</div></td>
+        <td class="symbol">
+          <a href="${dexUrl(item)}" target="_blank" rel="noreferrer">${item.symbol || "-"}</a>
+          <div class="muted">${item.name || item.token_address || ""}</div>
+        </td>
+        <td>${chainOf(item)}</td>
+        <td>${item.score}</td>
+        <td class="confidence">${item.confidence}</td>
+        <td>${item.verdict || "-"}</td>
+        <td>${item.whale || "-"}</td>
+        <td>${item.pressure || "-"}</td>
+        <td class="${flowClass(item.flow)}">${item.flow || "-"}</td>
+        <td>
+          ${item.honeypot ? '<span class="badge danger">HONEYPOT</span>' : '<span class="badge ' + (cls.key) + '">' + (item.risk || "-") + '</span>'}
+          <div class="flags">${(item.flags || []).slice(0,4).join(" · ")}</div>
+        </td>
+        <td>${Number(item.buy_tax || 0)}% / ${Number(item.sell_tax || 0)}%</td>
+        <td>${money(item.liquidity_usd != null ? item.liquidity_usd : item.market_cap)}</td>
+        <td>${money(item.market_cap)}</td>
+        <td>${money(item.volume_24h)}</td>`;
+      table.appendChild(tr);
+    });
+    status.innerText = "Done (" + shown + "/" + data.length + ")";
+  } catch (err) {
+    status.innerText = "Error loading data. Server belum nyala.";
+  }
+}
+refreshData();
+</script>
+</body>
+</html>
