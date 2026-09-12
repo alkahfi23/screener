@@ -697,7 +697,7 @@ def send_telegram(text: str, parse_mode: str = "HTML") -> bool:
                 "chat_id": TG_CHAT,
                 "text": text,
                 "parse_mode": parse_mode,
-                "disable_web_page_preview": False,
+                "disable_web_page_preview": True,
             },
             timeout=20,
         )
@@ -751,35 +751,80 @@ def dex_url(row: Dict) -> str:
     return ""
 
 
-def format_alert(row: Dict) -> str:
-    symbol = row.get("symbol") or "?"
-    name = row.get("name") or ""
-    chain = row.get("chain") or "-"
-    addr = row.get("token_address") or "-"
-    link = dex_url(row)
-    social_lines = []
-    for s in (row.get("socials") or [])[:6]:
-        kind = str(s.get("type") or "social").capitalize()
-        social_lines.append(f"• {kind}: {s.get('url')}")
-    for w in (row.get("websites") or [])[:3]:
-        social_lines.append(f"• Web: {w}")
-    social_block = "\n".join(social_lines) if social_lines else "• sosial: tidak ada di DexScreener"
-
-    title = f"<b>{symbol}</b>"
-    if name:
-        title += f" — {name}"
+def _esc(s) -> str:
     return (
-        "🟢 <b>EARLY GEM · GREEN FILTER</b>\n"
-        f"{title}\n"
-        f"⛓ {chain} · {row.get('dex') or '-'}\n\n"
-        f"⭐ score <b>{row.get('score')}</b> · conf <b>{row.get('confidence')}</b>\n"
-        f"🛡 risk <b>{row.get('risk')}</b> · upside <b>{row.get('upside')}</b>\n"
-        f"💧 liq {_usd(row.get('liquidity_usd'))} · 🧢 mcap {_usd(row.get('market_cap'))}\n"
-        f"📊 vol 24h {_usd(row.get('volume_24h'))}\n"
-        f"📈 24h {row.get('price_change_24h')}%\n\n"
-        f"<b>Contract</b>\n<code>{addr}</code>\n\n"
-        f"<b>Social</b>\n{social_block}\n\n"
-        f"DexScreener: {link}"
+        str(s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _social_label(kind: str) -> str:
+    k = (kind or "").lower()
+    mapping = {
+        "twitter": "X",
+        "x": "X",
+        "telegram": "Telegram",
+        "discord": "Discord",
+        "website": "Web",
+        "web": "Web",
+    }
+    return mapping.get(k, kind[:12].capitalize() if kind else "Link")
+
+
+def format_alert(row: Dict) -> str:
+    symbol = _esc(row.get("symbol") or "?")
+    name = _esc(row.get("name") or "")
+    chain = _esc(row.get("chain") or "-")
+    dex = _esc(row.get("dex") or "-")
+    addr = _esc(row.get("token_address") or "-")
+    link = dex_url(row)
+    change = row.get("price_change_24h")
+    try:
+        ch = f"{float(change):+.1f}%"
+    except (TypeError, ValueError):
+        ch = "-"
+
+    links = []
+    seen = set()
+    for s in (row.get("socials") or []):
+        url = (s.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        links.append(f'<a href="{_esc(url)}">{_esc(_social_label(s.get("type")))}</a>')
+    for w in (row.get("websites") or []):
+        url = str(w or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        links.append(f'<a href="{_esc(url)}">Web</a>')
+    social = " · ".join(links[:5]) if links else "—"
+
+    header = f"<b>${symbol}</b>"
+    if name:
+        header += f"  <i>{name}</i>"
+
+    chart = f'<a href="{_esc(link)}">DexScreener</a>' if link else "—"
+    return (
+        f"🟢 <b>GREEN GEM</b>\n"
+        f"{header}\n"
+        f"{chain} · {dex}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Score        <b>{row.get('score')}</b>\n"
+        f"Confidence   <b>{row.get('confidence')}</b>\n"
+        f"Risk         <b>{_esc(row.get('risk'))}</b>\n"
+        f"Upside       <b>{_esc(row.get('upside'))}</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Liq     {_usd(row.get('liquidity_usd'))}\n"
+        f"MCap    {_usd(row.get('market_cap'))}\n"
+        f"Vol     {_usd(row.get('volume_24h'))}\n"
+        f"24h     {ch}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"CA\n<code>{addr}</code>\n"
+        f"Social  {social}\n"
+        f"Chart   {chart}"
     )
 
 
