@@ -782,19 +782,36 @@ def is_green_signal(row: Dict) -> bool:
     return True
 
 
-def send_telegram(text: str, parse_mode: str = "HTML") -> bool:
+def tg_buttons(row: Dict) -> dict:
+    buttons = []
+    fomo = fomo_url(row)
+    dex = dex_url(row)
+    row_btns = []
+    if fomo:
+        row_btns.append({"text": "Trade FOMO", "url": fomo})
+    if dex:
+        row_btns.append({"text": "DexScreener", "url": dex})
+    if row_btns:
+        buttons.append(row_btns)
+    return {"inline_keyboard": buttons} if buttons else {}
+
+
+def send_telegram(text: str, parse_mode: str = "HTML", buttons: Optional[dict] = None) -> bool:
     if not TG_TOKEN or not TG_CHAT:
         print("telegram skip: token/chat_id kosong")
         return False
+    payload = {
+        "chat_id": TG_CHAT,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+    if buttons:
+        payload["reply_markup"] = buttons
     try:
         r = SESSION.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json={
-                "chat_id": TG_CHAT,
-                "text": text,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": True,
-            },
+            json=payload,
             timeout=20,
         )
         r.raise_for_status()
@@ -804,18 +821,21 @@ def send_telegram(text: str, parse_mode: str = "HTML") -> bool:
         return False
 
 
-def send_telegram_photo(photo_url: str, caption: str) -> bool:
+def send_telegram_photo(photo_url: str, caption: str, buttons: Optional[dict] = None) -> bool:
     if not TG_TOKEN or not TG_CHAT:
         return False
+    payload = {
+        "chat_id": TG_CHAT,
+        "photo": photo_url,
+        "caption": caption[:1024],
+        "parse_mode": "HTML",
+    }
+    if buttons:
+        payload["reply_markup"] = buttons
     try:
         r = SESSION.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
-            json={
-                "chat_id": TG_CHAT,
-                "photo": photo_url,
-                "caption": caption[:1024],
-                "parse_mode": "HTML",
-            },
+            json=payload,
             timeout=25,
         )
         r.raise_for_status()
@@ -835,6 +855,39 @@ def _usd(n) -> str:
     if x >= 1_000:
         return f"${x/1_000:.1f}K"
     return f"${x:,.0f}"
+
+
+FOMO_CHAIN = {
+    "solana": "solana",
+    "ethereum": "eth",
+    "base": "base",
+    "bsc": "bsc",
+    "arbitrum": "arb",
+    "avalanche": "avax",
+    "robinhood": "robinhood",
+}
+
+
+def fomo_url(row: Dict) -> str:
+    addr = (row.get("token_address") or "").strip()
+    if not addr:
+        return ""
+    slug = FOMO_CHAIN.get(str(row.get("chain") or "").lower(), "solana")
+    return f"https://fomo.family/{slug}/{addr}"
+
+
+def tg_buttons(row: Dict) -> dict:
+    buttons = []
+    row_btns = []
+    fomo = fomo_url(row)
+    dex = dex_url(row)
+    if fomo:
+        row_btns.append({"text": "Trade FOMO", "url": fomo})
+    if dex:
+        row_btns.append({"text": "DexScreener", "url": dex})
+    if row_btns:
+        buttons.append(row_btns)
+    return {"inline_keyboard": buttons} if buttons else {}
 
 
 def dex_url(row: Dict) -> str:
@@ -927,16 +980,21 @@ def format_alert(row: Dict) -> str:
     note = _esc(row.get("holder_note") or "")
     if note:
         body += f"Holders  {note} (top {row.get('top10_pct') or 0}%)\n"
-    body += f"Social  {social}\nChart   {chart}"
+    fomo = fomo_url(row)
+    body += f"Social  {social}\n"
+    body += f"Chart   {chart}\n"
+    if fomo:
+        body += f'Trade   <a href="{_esc(fomo)}">Open FOMO</a>'
     return body
 
 
 def notify_token(row: Dict) -> bool:
     caption = format_alert(row)
+    buttons = tg_buttons(row)
     icon = row.get("icon") or ""
-    if icon and send_telegram_photo(icon, caption):
+    if icon and send_telegram_photo(icon, caption, buttons):
         return True
-    return send_telegram(caption)
+    return send_telegram(caption, buttons=buttons)
 
 
 def run_alert_pass() -> Dict:
