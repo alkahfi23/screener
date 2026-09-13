@@ -21,6 +21,22 @@ button, select {
 button.primary { background: #22c55e; color: #052e16; font-weight: 600; }
 button.active { background: #38bdf8; color: #020617; font-weight: 600; }
 .status { margin: 10px 0 12px; color: #22c55e; }
+.worker {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 0 0 14px; font-size: 13px; color: #94a3b8;
+}
+.dot {
+  width: 10px; height: 10px; border-radius: 50%; background: #64748b;
+  box-shadow: 0 0 0 0 rgba(34,197,94,.7);
+}
+.dot.on { background: #22c55e; animation: pulse 1.6s infinite; }
+.dot.busy { background: #38bdf8; animation: pulse 1s infinite; }
+.dot.off { background: #ef4444; }
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(34,197,94,.55); }
+  70% { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+  100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+}
 .legend {
   display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;
   font-size: 12px; color: #94a3b8;
@@ -73,6 +89,10 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
     <span><span class="badge danger">RED FLAG</span> honeypot / cannot sell</span>
     <span><span class="badge unknown">UNKNOWN</span> checker belum yakin</span>
     <span><span class="badge safe">HIGH ROOM</span> mcap kecil + liq/vol waras — spekulatif</span>
+  </div>
+  <div class="worker">
+    <span id="workerDot" class="dot off"></span>
+    <span id="workerText">background: checking...</span>
   </div>
   <div id="status" class="status">Ready</div>
   <div class="section-title" id="sectionTitle">Discovery – Early Gems</div>
@@ -213,7 +233,37 @@ async function refreshData() {
     status.innerText = "Error loading data. Server belum nyala.";
   }
 }
+async function pollWorker() {
+  const dot = document.getElementById("workerDot");
+  const text = document.getElementById("workerText");
+  try {
+    const res = await fetch("/alerts/status");
+    const s = await res.json();
+    const ago = s.last_end ? Math.max(0, Math.round(Date.now()/1000 - s.last_end)) : null;
+    if (s.scanning) {
+      dot.className = "dot busy";
+      text.textContent = "background: SCANNING sekarang...";
+    } else if (s.loop_alive) {
+      dot.className = "dot on";
+      const last = s.last_result || {};
+      text.textContent = "background: ON · tiap " + s.interval_sec + "s · last "
+        + (ago == null ? "-" : ago + "s ago")
+        + " · checked " + (last.checked || 0)
+        + " · sent " + (last.sent || 0)
+        + (s.telegram ? " · TG ready" : " · TG token kosong");
+    } else {
+      dot.className = "dot off";
+      text.textContent = "background: OFF (ENABLE_TELEGRAM=0 atau thread belum start)";
+    }
+    if (s.last_error) text.textContent += " · err: " + s.last_error;
+  } catch (e) {
+    document.getElementById("workerDot").className = "dot off";
+    document.getElementById("workerText").textContent = "background: server tidak merespon";
+  }
+}
 refreshData();
+pollWorker();
+setInterval(pollWorker, 5000);
 </script>
 </body>
 </html>
