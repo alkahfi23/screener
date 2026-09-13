@@ -109,6 +109,12 @@ def remember_tokens(rows: List[Dict]) -> None:
                 "last_liq": row.get("liquidity_usd") or 0,
                 "age_hours": row.get("age_hours"),
                 "url": row.get("url") or prev.get("url") or "",
+                "creator": row.get("creator") or prev.get("creator") or "",
+                "top1_pct": row.get("top1_pct") or prev.get("top1_pct") or 0,
+                "top10_pct": row.get("top10_pct") or prev.get("top10_pct") or 0,
+                "holder_count": row.get("holder_count") or prev.get("holder_count") or 0,
+                "lp_locked": row.get("lp_locked") if row.get("lp_locked") is not None else prev.get("lp_locked"),
+                "risk": row.get("risk") or prev.get("risk") or "",
             }
         # drop too old
         keep = {}
@@ -532,6 +538,15 @@ def _holder_snapshot(data: Dict) -> Dict:
         flags_h.append("INSIDER_NETWORK")
     if data.get("rugged"):
         flags_h.append("CREATOR_RUGGED")
+    top1 = top[0]["pct"] if top else 0
+    non_lp = [h for h in top if "pool" not in str(h.get("label") or "").lower() and "lp" not in str(h.get("label") or "").lower()]
+    top1_nonlp = non_lp[0]["pct"] if non_lp else 0
+    lp_locked = data.get("lpLocked")
+    if lp_locked is None:
+        markets = data.get("markets") or []
+        if markets and isinstance(markets[0], dict):
+            lp_locked = markets[0].get("lpLocked")
+    lp_pct = data.get("lpLockedPct")
     if "CREATOR_RUGGED" in flags_h:
         note = "creator punya jejak rug"
     elif "INSIDER_CLUSTER" in flags_h or "INSIDER_NETWORK" in flags_h:
@@ -543,8 +558,13 @@ def _holder_snapshot(data: Dict) -> Dict:
     return {
         "creator": creator or "",
         "top_holders": top[:8],
+        "top1_pct": round(float(top1_nonlp or top1), 2),
         "top10_pct": round(top10, 2),
         "insider_pct": round(insider_pct, 2),
+        "holder_count": data.get("totalHolders") or data.get("holderCount") or len(holders),
+        "lp_locked": bool(lp_locked) if lp_locked is not None else None,
+        "lp_locked_pct": lp_pct,
+        "rugged": bool(data.get("rugged")),
         "holder_note": note,
         "holder_flags": flags_h,
     }
@@ -639,6 +659,11 @@ def attach_security(rows: List[Dict]) -> List[Dict]:
         row["top10_pct"] = sec.get("top10_pct") or 0
         row["insider_pct"] = sec.get("insider_pct") or 0
         row["holder_note"] = sec.get("holder_note") or ""
+        row["top1_pct"] = sec.get("top1_pct") or 0
+        row["holder_count"] = sec.get("holder_count") or 0
+        row["lp_locked"] = sec.get("lp_locked")
+        row["lp_locked_pct"] = sec.get("lp_locked_pct")
+        row["rugged"] = bool(sec.get("rugged"))
         if sec.get("honeypot"):
             row["confidence"] = min(int(row.get("confidence") or 0), 25)
             row["verdict"] = "HONEYPOT RISK"
@@ -1105,7 +1130,13 @@ def format_alert(row: Dict) -> str:
         body += f"Dev tx  https://solscan.io/account/{creator}\n"
     note = _esc(row.get("holder_note") or "")
     if note:
-        body += f"Holders  {note} (top {row.get('top10_pct') or 0}%)\n"
+        body += (
+            f"Holders  {note}\n"
+            f"Top1 {row.get('top1_pct') or 0}% · Top10 {row.get('top10_pct') or 0}%"
+            f" · n={row.get('holder_count') or '-'}\n"
+        )
+        if row.get("lp_locked") is not None:
+            body += f"LP lock  {row.get('lp_locked')} {row.get('lp_locked_pct') or ''}%\n"
     fomo = fomo_url(row)
     body += f"Social  {social}\n"
     body += f"Chart   {chart}\n"
