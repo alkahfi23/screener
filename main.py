@@ -619,7 +619,7 @@ def upside_label(row: Dict) -> Tuple[str, str]:
     vol_liq = vol / liq if liq else 0
     liq_mcap = liq / mcap if mcap else 0
 
-    if vol_liq > 10:
+    if vol_liq > 6:
         return "WASHY", "vol jauh di atas liq"
     if liq < 8000:
         return "THIN", "liq terlalu tipis"
@@ -743,7 +743,33 @@ def is_green_signal(row: Dict) -> bool:
     if int(row.get("confidence") or 0) < ALERT_MIN_CONF:
         return False
     upside = str(row.get("upside") or "").upper()
-    if upside in {"WASHY", "THIN", "NO UPSIDE", "LOW ROOM", "UNRATED", "CAUTION SETUP"}:
+    if upside not in {"HIGH ROOM", "SPECULATIVE"}:
+        return False
+
+    liq = float(row.get("liquidity_usd") or 0)
+    mcap = float(row.get("market_cap") or 0)
+    vol = float(row.get("volume_24h") or 0)
+    change = float(row.get("price_change_24h") or 0)
+    age = row.get("age_hours")
+    tax = max(float(row.get("sell_tax") or 0), float(row.get("buy_tax") or 0))
+    top10 = float(row.get("top10_pct") or 0)
+
+    if tax >= 10:
+        return False
+    if liq < 20_000 or liq > 400_000:
+        return False
+    if mcap < 25_000 or mcap > 800_000:
+        return False
+    if vol <= 0 or liq <= 0:
+        return False
+    ratio = vol / liq
+    if ratio < 0.3 or ratio > 4:
+        return False
+    if change < 5 or change > 45:
+        return False
+    if age is not None and (age < 2 or age > 72):
+        return False
+    if top10 >= 40:
         return False
     return True
 
