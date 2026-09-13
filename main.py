@@ -725,6 +725,14 @@ ALERT_INTERVAL = int(os.getenv("ALERT_INTERVAL_SEC", "180"))
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 SENT_ALERTS = {}
+WORKER = {
+    "running": False,
+    "last_start": 0,
+    "last_end": 0,
+    "last_result": {},
+    "last_error": "",
+    "loop_alive": False,
+}
 
 
 def is_green_signal(row: Dict) -> bool:
@@ -932,29 +940,43 @@ def notify_token(row: Dict) -> bool:
 
 
 def run_alert_pass() -> Dict:
-    rows = scan_top(limit=20, mode="balanced")
-    sent = 0
-    now = time.time()
-    for row in rows:
-        if not is_green_signal(row):
-            continue
-        key = f"{row.get('chain')}:{(row.get('token_address') or '').lower()}"
-        last = SENT_ALERTS.get(key, 0)
-        if now - last < 6 * 3600:
-            continue
-        if notify_token(row):
-            SENT_ALERTS[key] = now
-            sent += 1
-    return {"checked": len(rows), "sent": sent}
+    WORKER["running"] = True
+    WORKER["last_start"] = time.time()
+    WORKER["last_error"] = ""
+    try:
+        rows = scan_top(limit=20, mode="balanced")
+        sent = 0
+        now = time.time()
+        for row in rows:
+            if not is_green_signal(row):
+                continue
+            key = f"{row.get('chain')}:{(row.get('token_address') or '').lower()}"
+            last = SENT_ALERTS.get(key, 0)
+            if now - last < 6 * 3600:
+                continue
+            if notify_token(row):
+                SENT_ALERTS[key] = now
+                sent += 1
+        result = {"checked": len(rows), "sent": sent}
+        WORKER["last_result"] = result
+        return result
+    except Exception as e:
+        WORKER["last_error"] = str(e)
+        raise
+    finally:
+        WORKER["running"] = False
+        WORKER["last_end"] = time.time()
 
 
 def alert_loop():
+    WORKER["loop_alive"] = True
     time.sleep(8)
     while True:
         try:
             print("alert pass:", run_alert_pass())
         except Exception as e:
             print("alert loop error:", e)
+            WORKER["last_error"] = str(e)
         time.sleep(max(60, ALERT_INTERVAL))
 
 
@@ -975,6 +997,21 @@ def alerts_test():
 @app.get("/alerts/run")
 def alerts_run():
     return run_alert_pass()
+
+
+@app.get("/alerts/status")
+def alerts_status():
+    return {
+        "loop_alive": WORKER.get("loop_alive"),
+        "scanning": WORKER.get("running"),
+        "telegram": bool(TG_TOKEN and TG_CHAT),
+        "interval_sec": ALERT_INTERVAL,
+        "last_start": WORKER.get("last_start") or 0,
+        "last_end": WORKER.get("last_end") or 0,
+        "last_result": WORKER.get("last_result") or {},
+        "last_error": WORKER.get("last_error") or "",
+        "sent_cache": len(SENT_ALERTS),
+    }
 
 
 @app.get("/")
