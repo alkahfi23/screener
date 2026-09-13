@@ -425,6 +425,53 @@ def check_goplus_solana(address: str) -> Dict:
     }
 
 
+def _holder_snapshot(data: Dict) -> Dict:
+    holders = data.get("topHolders") or []
+    creator = data.get("creator") or ""
+    top = []
+    insider_pct = 0.0
+    top10 = 0.0
+    for h in holders[:12]:
+        if not isinstance(h, dict):
+            continue
+        pct = float(h.get("pct") or h.get("percentage") or 0)
+        addr = h.get("address") or h.get("owner") or h.get("wallet") or ""
+        insider = bool(h.get("insider") or h.get("isInsider"))
+        label = str(h.get("label") or "")
+        top.append({"address": addr, "pct": round(pct, 2), "insider": insider, "label": label})
+        low = label.lower()
+        if any(x in low for x in ("pool", "raydium", "lp", "pump")):
+            continue
+        top10 += pct
+        if insider:
+            insider_pct += pct
+    flags_h = []
+    if top10 >= 50:
+        flags_h.append("CONCENTRATED_HOLDERS")
+    if insider_pct >= 15:
+        flags_h.append("INSIDER_CLUSTER")
+    if data.get("graphInsidersDetected") or data.get("insiderNetworks"):
+        flags_h.append("INSIDER_NETWORK")
+    if data.get("rugged"):
+        flags_h.append("CREATOR_RUGGED")
+    if "CREATOR_RUGGED" in flags_h:
+        note = "creator punya jejak rug"
+    elif "INSIDER_CLUSTER" in flags_h or "INSIDER_NETWORK" in flags_h:
+        note = "cluster insider/bundler"
+    elif top10 >= 50:
+        note = "top holder non-LP kuasai supply"
+    else:
+        note = "sebaran holder biasa"
+    return {
+        "creator": creator or "",
+        "top_holders": top[:8],
+        "top10_pct": round(top10, 2),
+        "insider_pct": round(insider_pct, 2),
+        "holder_note": note,
+        "holder_flags": flags_h,
+    }
+
+
 def check_rugcheck(address: str) -> Dict:
     url = f"https://api.rugcheck.xyz/v1/tokens/{address}/report"
     data = _get_json(url, timeout=15)
@@ -436,20 +483,24 @@ def check_rugcheck(address: str) -> Dict:
             names.append(str(r.get("name") or r.get("level") or "risk"))
         else:
             names.append(str(r))
-    level = str(data.get("score_normalised") or data.get("tokenMeta", {}).get("risk") or "")
-    honeypot = any("honeypot" in n.lower() or "rugged" in n.lower() for n in names)
-    high = score is not None and float(score) >= 1000
+    snap = _holder_snapshot(data if isinstance(data, dict) else {})
+    names.extend(snap["holder_flags"])
+    level = str(data.get("score_normalised") or "")
+    honeypot = any("honeypot" in n.lower() or "rugged" in n.lower() for n in names) or bool(data.get("rugged"))
+    high = (score is not None and float(score) >= 1000) or bool(snap["holder_flags"])
     risk = "HONEYPOT" if honeypot else ("HIGH" if high or names else "LOW")
-    return {
+    out = {
         "provider": "rugcheck",
         "honeypot": honeypot,
         "risk": risk,
-        "flags": names[:8],
+        "flags": names[:10],
         "buy_tax": 0,
         "sell_tax": 0,
         "rugcheck_score": score,
         "level": level,
     }
+    out.update(snap)
+    return out
 
 
 def security_check(chain: str, address: str) -> Dict:
@@ -505,6 +556,11 @@ def attach_security(rows: List[Dict]) -> List[Dict]:
         row["buy_tax"] = sec.get("buy_tax") or 0
         row["sell_tax"] = sec.get("sell_tax") or 0
         row["sec_provider"] = sec.get("provider") or ""
+        row["creator"] = sec.get("creator") or ""
+        row["top_holders"] = sec.get("top_holders") or []
+        row["top10_pct"] = sec.get("top10_pct") or 0
+        row["insider_pct"] = sec.get("insider_pct") or 0
+        row["holder_note"] = sec.get("holder_note") or ""
         if sec.get("honeypot"):
             row["confidence"] = min(int(row.get("confidence") or 0), 25)
             row["verdict"] = "HONEYPOT RISK"
@@ -675,7 +731,10 @@ def is_green_signal(row: Dict) -> bool:
     if row.get("honeypot") or row.get("risk") in ("HONEYPOT", "HIGH"):
         return False
     flags = [str(f).upper() for f in (row.get("flags") or [])]
-    if any(x in " ".join(flags) for x in ("HONEYPOT", "CANNOT_SELL", "CANNOT_BUY", "BLACKLIST")):
+    if any(x in " ".join(flags) for x in (
+        "HONEYPOT", "CANNOT_SELL", "CANNOT_BUY", "BLACKLIST",
+        "INSIDER_CLUSTER", "INSIDER_NETWORK", "CREATOR_RUGGED", "CONCENTRATED_HOLDERS",
+    )):
         return False
     if row.get("risk") not in ("LOW", None, ""):
         return False
@@ -807,7 +866,7 @@ def format_alert(row: Dict) -> str:
         header += f"  <i>{name}</i>"
 
     chart = f'<a href="{_esc(link)}">DexScreener</a>' if link else "—"
-    return (
+    body = (
         f"🟢 <b>GREEN GEM</b>\n"
         f"{header}\n"
         f"{chain} · {dex}\n"
@@ -823,9 +882,16 @@ def format_alert(row: Dict) -> str:
         f"24h     {ch}\n"
         f"━━━━━━━━━━━━━━\n"
         f"CA\n<code>{addr}</code>\n"
-        f"Social  {social}\n"
-        f"Chart   {chart}"
     )
+    creator = _esc(row.get("creator") or "")
+    if creator:
+        body += f"Dev  <code>{creator}</code>\n"
+        body += f"Dev tx  https://solscan.io/account/{creator}\n"
+    note = _esc(row.get("holder_note") or "")
+    if note:
+        body += f"Holders  {note} (top {row.get('top10_pct') or 0}%)\n"
+    body += f"Social  {social}\nChart   {chart}"
+    return body
 
 
 def notify_token(row: Dict) -> bool:
