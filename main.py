@@ -5,6 +5,7 @@ from typing import List, Dict, Optional, Tuple
 import requests
 import time
 import os
+import json
 import threading
 
 app = FastAPI(title="Hybrid Early Gem Scanner – DexScreener PRO")
@@ -42,6 +43,80 @@ GOPLUS_CHAIN = {
 
 SESSION = requests.Session()
 SESSION.headers.update({"Accept": "application/json", "User-Agent": "gem-scanner/2.0"})
+
+DATA_DIR = os.getenv("DATA_DIR", BASE_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
+WATCH_FILE = os.path.join(DATA_DIR, "watchlist.json")
+WATCH_MAX_AGE_HOURS = 14 * 24
+WATCH_LOCK = threading.Lock()
+
+
+def load_watch() -> Dict[str, Dict]:
+    if not os.path.exists(WATCH_FILE):
+        return {}
+    try:
+        with open(WATCH_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("watch load error:", e)
+        return {}
+
+
+def save_watch(data: Dict[str, Dict]) -> None:
+    tmp = WATCH_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, WATCH_FILE)
+
+
+def remembered_addresses() -> List[str]:
+    now = time.time()
+    out = []
+    for rec in load_watch().values():
+        first = float(rec.get("first_seen") or 0)
+        if first and (now - first) / 3600 > WATCH_MAX_AGE_HOURS:
+            continue
+        addr = rec.get("token_address")
+        if addr:
+            out.append(addr)
+    return out
+
+
+def remember_tokens(rows: List[Dict]) -> None:
+    if not rows:
+        return
+    now = time.time()
+    with WATCH_LOCK:
+        data = load_watch()
+        for row in rows:
+            addr = (row.get("token_address") or "").strip()
+            chain = (row.get("chain") or "").lower()
+            if not addr:
+                continue
+            key = f"{chain}:{addr.lower()}"
+            prev = data.get(key) or {}
+            data[key] = {
+                "token_address": addr,
+                "chain": chain,
+                "symbol": row.get("symbol") or prev.get("symbol") or "",
+                "name": row.get("name") or prev.get("name") or "",
+                "pair_address": row.get("pair_address") or prev.get("pair_address") or "",
+                "first_seen": prev.get("first_seen") or now,
+                "last_seen": now,
+                "first_mcap": prev.get("first_mcap") or row.get("market_cap") or 0,
+                "last_mcap": row.get("market_cap") or 0,
+                "last_liq": row.get("liquidity_usd") or 0,
+                "age_hours": row.get("age_hours"),
+                "url": row.get("url") or prev.get("url") or "",
+            }
+        # drop too old
+        keep = {}
+        for k, rec in data.items():
+            first = float(rec.get("first_seen") or now)
+            if (now - first) / 3600 <= WATCH_MAX_AGE_HOURS:
+                keep[k] = rec
+        save_watch(keep)
 
 
 def _get_json(url: str, timeout: int = 12):
@@ -111,6 +186,9 @@ def fetch_pairs() -> List[Dict]:
 
     discovered = discover_token_addresses()
     addrs = [addr for _, addr in discovered]
+    for old in remembered_addresses():
+        if old not in addrs:
+            addrs.append(old)
     pairs = fetch_pairs_for_tokens(addrs) if addrs else []
 
     # fallback ringan: search pair yang emang pair, bukan nama chain
@@ -686,7 +764,9 @@ def scan_top(
                 continue
             results.append(enrich(p, False))
         ranked = sorted(results, key=lambda x: x["confidence"], reverse=True)[:limit]
-        return attach_security(ranked)
+        secured = attach_security(ranked)
+        remember_tokens(secured)
+        return secured
     except Exception as e:
         print("DISCOVERY ERROR:", e)
         return []
@@ -708,6 +788,52 @@ def scan_breakout(limit: int = 10):
         return attach_security(ranked)
     except Exception as e:
         print("BREAKOUT ERROR:", e)
+        return []
+
+
+@app.get("/scan/watch")
+def scan_watch(limit: int = 20):
+    """Token yang pernah disimpan, termasuk yang sudah lewat 72 jam."""
+    try:
+        watch = load_watch()
+        if not watch:
+            return []
+        pairs = group_best_by_token(fetch_pairs())
+        results = []
+        for key, rec in watch.items():
+            p = pairs.get(key)
+            if not p:
+                results.append({
+                    "symbol": rec.get("symbol"),
+                    "chain": (rec.get("chain") or "").upper(),
+                    "token_address": rec.get("token_address"),
+                    "first_seen": rec.get("first_seen"),
+                    "first_mcap": rec.get("first_mcap"),
+                    "last_mcap": rec.get("last_mcap"),
+                    "age_hours": rec.get("age_hours"),
+                    "status": "MISSING_PAIR",
+                    "url": rec.get("url") or "",
+                })
+                continue
+            row = enrich(p, False)
+            row["first_seen"] = rec.get("first_seen")
+            row["first_mcap"] = rec.get("first_mcap")
+            row["tracked_hours"] = round((time.time() - float(rec.get("first_seen") or time.time())) / 3600, 2)
+            try:
+                fm = float(rec.get("first_mcap") or 0)
+                lm = float(row.get("market_cap") or 0)
+                row["mcap_multiple"] = round(lm / fm, 2) if fm > 0 else None
+            except (TypeError, ValueError, ZeroDivisionError):
+                row["mcap_multiple"] = None
+            results.append(row)
+        live = [r for r in results if r.get("token_address") and r.get("pair_address")]
+        live = attach_security(live[:limit])
+        remember_tokens(live)
+        missing = [r for r in results if r.get("status") == "MISSING_PAIR"]
+        out = live + missing
+        return sorted(out, key=lambda x: float(x.get("age_hours") or 0), reverse=True)[:limit]
+    except Exception as e:
+        print("WATCH ERROR:", e)
         return []
 
 
@@ -1077,7 +1203,7 @@ def root():
     return {
         "status": "OK",
         "message": "Hybrid Early Gem Scanner LIVE",
-        "endpoints": ["/ui", "/scan/top", "/scan/breakout", "/alerts/test", "/alerts/run"],
+        "endpoints": ["/ui", "/scan/top", "/scan/breakout", "/scan/watch", "/alerts/test", "/alerts/run"],
         "telegram": bool(TG_TOKEN and TG_CHAT),
     }
 
