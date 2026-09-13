@@ -82,6 +82,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
     </label>
     <button id="btnDiscovery" class="active" onclick="setView('discovery')">Discovery</button>
     <button id="btnBreakout" onclick="setView('breakout')">Breakout</button>
+    <button id="btnWatch" onclick="setView('watch')">Watch</button>
   </div>
   <div class="legend">
     <span><span class="badge safe">SAFE FILTER</span> risk LOW, bukan honeypot</span>
@@ -110,6 +111,9 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
         <th>Pressure</th>
         <th>Flow</th>
         <th>Risk</th>
+        <th>Holders</th>
+        <th>LP</th>
+        <th>Dev</th>
         <th>Tax</th>
         <th>Liquidity</th>
         <th>Market Cap</th>
@@ -136,8 +140,11 @@ function setView(view) {
   currentView = view;
   document.getElementById("btnDiscovery").classList.toggle("active", view === "discovery");
   document.getElementById("btnBreakout").classList.toggle("active", view === "breakout");
+  document.getElementById("btnWatch").classList.toggle("active", view === "watch");
   document.getElementById("sectionTitle").innerText =
-    view === "discovery" ? "Discovery – Early Gems" : "Breakout – Revival / Momentum";
+    view === "discovery" ? "Discovery – Early Gems" :
+    view === "watch" ? "Watch – token tersimpan" :
+    "Breakout – Revival / Momentum";
   refreshData();
 }
 function flowClass(flow) {
@@ -177,6 +184,8 @@ async function refreshData() {
   status.innerText = "Fetching data...";
   const url = currentView === "discovery"
     ? "/scan/top?limit=20&mode=" + document.getElementById("mode").value
+    : currentView === "watch"
+    ? "/scan/watch?limit=20"
     : "/scan/breakout?limit=20";
   try {
     const res = await fetch(url);
@@ -222,6 +231,12 @@ async function refreshData() {
           ${item.honeypot ? '<span class="badge danger">HONEYPOT</span>' : '<span class="badge ' + (cls.key) + '">' + (item.risk || "-") + '</span>'}
           <div class="flags">${(item.flags || []).slice(0,4).join(" · ")}</div>
         </td>
+        <td>
+          <div>top1 ${item.top1_pct || 0}% · top10 ${item.top10_pct || 0}%</div>
+          <div class="muted">${item.holder_note || "n=" + (item.holder_count || "-")}</div>
+        </td>
+        <td>${item.lp_locked == null ? "-" : (item.lp_locked ? "LOCKED " + (item.lp_locked_pct || "") : "UNLOCKED")}</td>
+        <td class="muted">${item.creator ? String(item.creator).slice(0,6) + "…" + String(item.creator).slice(-4) : "-"}</td>
         <td>${Number(item.buy_tax || 0)}% / ${Number(item.sell_tax || 0)}%</td>
         <td>${money(item.liquidity_usd != null ? item.liquidity_usd : item.market_cap)}</td>
         <td>${money(item.market_cap)}</td>
