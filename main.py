@@ -742,6 +742,9 @@ def is_green_signal(row: Dict) -> bool:
         return False
     if int(row.get("confidence") or 0) < ALERT_MIN_CONF:
         return False
+    upside = str(row.get("upside") or "").upper()
+    if upside in {"WASHY", "THIN", "NO UPSIDE", "LOW ROOM", "UNRATED", "CAUTION SETUP"}:
+        return False
     return True
 
 
