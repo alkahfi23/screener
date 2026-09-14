@@ -64,6 +64,19 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
 .flow-dist { color: #ef4444; font-weight: 600; }
 .flow-neutral { color: #9ca3af; }
 .confidence { font-weight: 700; }
+.whale-wrap { display: grid; gap: 14px; margin-bottom: 28px; }
+.whale-card {
+  background: linear-gradient(180deg, #0b1220, #020617);
+  border: 1px solid #1e293b;
+  border-radius: 14px;
+  padding: 16px 18px;
+}
+.whale-card h3 { margin: 0 0 10px; color: #e2e8f0; font-size: 15px; }
+.bar-row { display: grid; grid-template-columns: 160px 1fr 90px; gap: 10px; align-items: center; margin: 8px 0; font-size: 12px; }
+.bar-track { height: 10px; background: #1e293b; border-radius: 99px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #22c55e, #38bdf8); }
+.bar-fill.hot { background: linear-gradient(90deg, #f59e0b, #ef4444); }
+.note-box { color: #94a3b8; font-size: 12px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -84,6 +97,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
     <button id="btnBreakout" onclick="setView('breakout')">Breakout</button>
     <button id="btnWatch" onclick="setView('watch')">Watch</button>
     <button id="btnNarr" onclick="setView('narratives')">Narasi</button>
+    <button id="btnWhales" onclick="setView('whales')">Whale Flow</button>
   </div>
   <div class="legend">
     <span><span class="badge safe">SAFE FILTER</span> risk LOW, bukan honeypot</span>
@@ -143,10 +157,12 @@ function setView(view) {
   document.getElementById("btnBreakout").classList.toggle("active", view === "breakout");
   document.getElementById("btnWatch").classList.toggle("active", view === "watch");
   document.getElementById("btnNarr").classList.toggle("active", view === "narratives");
+  document.getElementById("btnWhales").classList.toggle("active", view === "whales");
   document.getElementById("sectionTitle").innerText =
     view === "discovery" ? "Discovery – Early Gems" :
     view === "watch" ? "Watch – token tersimpan" :
     view === "narratives" ? "Narasi – klaster volume" :
+    view === "whales" ? "Whale Flow – pergeseran tape" :
     "Breakout – Revival / Momentum";
   refreshData();
 }
@@ -189,12 +205,41 @@ async function refreshData() {
     ? "/scan/top?limit=20&mode=" + document.getElementById("mode").value
     : currentView === "watch"
     ? "/scan/watch?limit=20"
-    : currentView === "narratives"
+    : currentView === "narratives" || currentView === "whales"
     ? "/scan/narratives"
     : "/scan/breakout?limit=20";
   try {
     const res = await fetch(url);
     const raw = await res.json();
+    if (currentView === "whales") {
+      if (!Array.isArray(raw) || !raw.length) {
+        status.innerText = "Belum ada data whale flow";
+        return;
+      }
+      const maxVol = Math.max(...raw.map(n => Number(n.volume_24h || 0)), 1);
+      const wrap = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 18;
+      let bars = raw.slice(0, 8).map(n => {
+        const vol = Number(n.volume_24h || 0);
+        const liq = Number(n.liquidity_usd || 0);
+        const ratio = liq ? vol / liq : 0;
+        const pct = Math.max(4, Math.round(vol / maxVol * 100));
+        const hot = ratio > 6 ? "hot" : "";
+        return `<div class="bar-row"><div>${n.narrative}</div><div class="bar-track"><div class="bar-fill ${hot}" style="width:${pct}%"></div></div><div>${money(vol)}</div></div>`;
+      }).join("");
+      td.innerHTML = `<div class="whale-wrap">
+        <div class="whale-card">
+          <h3>Aliran volume per narasi</h3>
+          ${bars}
+          <p class="note-box">Bar merah/oranye = vol/liq panas (washee). Hijau-biru = volume ada, belum gila. Ini tape Dex, bukan wallet 7-figure.</p>
+        </div>
+      </div>`;
+      wrap.appendChild(td);
+      table.appendChild(wrap);
+      status.innerText = "Whale flow " + raw.length + " cluster";
+      return;
+    }
     if (currentView === "narratives") {
       if (!Array.isArray(raw) || !raw.length) {
         status.innerText = "Belum ada klaster narasi";
