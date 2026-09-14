@@ -1010,11 +1010,11 @@ def _usd(n) -> str:
 
 FOMO_CHAIN = {
     "solana": "solana",
-    "ethereum": "eth",
+    "ethereum": "ethereum",
     "base": "base",
     "bsc": "bsc",
-    "arbitrum": "arb",
-    "avalanche": "avax",
+    "arbitrum": "arbitrum",
+    "avalanche": "avalanche",
     "robinhood": "robinhood",
 }
 
@@ -1024,7 +1024,7 @@ def fomo_url(row: Dict) -> str:
     if not addr:
         return ""
     slug = FOMO_CHAIN.get(str(row.get("chain") or "").lower(), "solana")
-    return f"https://fomo.family/{slug}/{addr}"
+    return f"https://fomo.family/tokens/{slug}/{addr}"
 
 
 def tg_buttons(row: Dict) -> dict:
