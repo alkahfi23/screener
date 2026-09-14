@@ -371,6 +371,49 @@ def confidence_score(base_score: int, whale: Optional[str], pressure_bonus: int,
     return max(0, min(confidence, 100))
 
 
+NARRATIVE_RULES = [
+    ("AI / AGENT", ("ai", "agent", "gpt", "llm", "neural", "robot", "agi", "flyai", "finch")),
+    ("CAT / MEME ANIMAL", ("cat", "kitten", "purr", "meow", "doge", "dog", "squirrel", "ape", "frog", "pepe", "inu", "monkey", "trump")),
+    ("PUMP.FUN", ("pump", "bonk", "bags")),
+    ("ROBINHOOD CHAIN", ("robinhood",)),
+    ("PRIVACY", ("priv", "privat", "zk", "shield", "anon")),
+    ("GAMING", ("game", "play", "xp", "quest", "life is a game")),
+    ("POLITICS / TRUMP", ("trump", "maga", "trumpy", "potus")),
+    ("STOCK / RWA", ("stock", "nasdaq", "tokenized", "rwa", "treasury")),
+]
+
+
+def detect_narrative(row_or_pair: Dict) -> str:
+    parts = []
+    if "baseToken" in row_or_pair:
+        base = row_or_pair.get("baseToken") or {}
+        parts += [base.get("symbol"), base.get("name"), row_or_pair.get("chainId")]
+        info = row_or_pair.get("info") or {}
+        for s in info.get("socials") or []:
+            parts.append((s or {}).get("url"))
+        for w in info.get("websites") or []:
+            parts.append(w if isinstance(w, str) else (w or {}).get("url"))
+    else:
+        parts += [
+            row_or_pair.get("symbol"),
+            row_or_pair.get("name"),
+            row_or_pair.get("chain"),
+            row_or_pair.get("dex"),
+        ]
+        for s in row_or_pair.get("socials") or []:
+            parts.append((s or {}).get("url"))
+        for w in row_or_pair.get("websites") or []:
+            parts.append(w)
+    blob = " ".join(str(x or "") for x in parts).lower()
+    hits = []
+    for label, keys in NARRATIVE_RULES:
+        if any(k in blob for k in keys):
+            hits.append(label)
+    if "robinhood" in blob and "ROBINHOOD CHAIN" not in hits:
+        hits.append("ROBINHOOD CHAIN")
+    return " · ".join(hits[:3]) if hits else "UNLABELED"
+
+
 def enrich(p: Dict, is_breakout: bool = False) -> Dict:
     score = score_pair(p)
     whale = whale_badge(p)
@@ -420,6 +463,7 @@ def enrich(p: Dict, is_breakout: bool = False) -> Dict:
         "age_hours": round(age, 2) if age is not None else None,
         "pair_address": p.get("pairAddress"),
         "url": p.get("url") or "",
+        "narrative": detect_narrative(p),
         "upside": "UNRATED",
         "upside_note": "",
         "icon": icon,
@@ -860,6 +904,60 @@ def scan_watch(limit: int = 20):
     except Exception as e:
         print("WATCH ERROR:", e)
         return []
+
+
+@app.get("/scan/narratives")
+def scan_narratives():
+    rows = scan_top(limit=20, mode="balanced")
+    extra = []
+    try:
+        extra = [r for r in scan_watch(limit=20) if r.get("symbol")]
+    except Exception:
+        extra = []
+    seen = set()
+    merged = []
+    for r in rows + extra:
+        key = f"{r.get('chain')}:{(r.get('token_address') or '').lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        if not r.get("narrative"):
+            r["narrative"] = detect_narrative(r)
+        merged.append(r)
+    buckets: Dict[str, Dict] = {}
+    for r in merged:
+        label = r.get("narrative") or "UNLABELED"
+        for part in [x.strip() for x in label.split("·")]:
+            part = part.strip() or "UNLABELED"
+            b = buckets.setdefault(part, {
+                "narrative": part,
+                "tokens": 0,
+                "volume_24h": 0.0,
+                "liquidity_usd": 0.0,
+                "market_cap": 0.0,
+                "symbols": [],
+            })
+            b["tokens"] += 1
+            b["volume_24h"] += float(r.get("volume_24h") or 0)
+            b["liquidity_usd"] += float(r.get("liquidity_usd") or 0)
+            b["market_cap"] += float(r.get("market_cap") or 0)
+            if r.get("symbol"):
+                b["symbols"].append({
+                    "symbol": r.get("symbol"),
+                    "chain": r.get("chain"),
+                    "volume_24h": r.get("volume_24h"),
+                    "market_cap": r.get("market_cap"),
+                    "upside": r.get("upside"),
+                    "risk": r.get("risk"),
+                    "url": r.get("url"),
+                })
+    out = sorted(buckets.values(), key=lambda x: x["volume_24h"], reverse=True)
+    for b in out:
+        b["volume_24h"] = round(b["volume_24h"], 2)
+        b["liquidity_usd"] = round(b["liquidity_usd"], 2)
+        b["market_cap"] = round(b["market_cap"], 2)
+        b["symbols"] = sorted(b["symbols"], key=lambda x: float(x.get("volume_24h") or 0), reverse=True)[:8]
+    return out
 
 
 @app.get("/ui")
