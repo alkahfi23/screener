@@ -83,6 +83,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
     <button id="btnDiscovery" class="active" onclick="setView('discovery')">Discovery</button>
     <button id="btnBreakout" onclick="setView('breakout')">Breakout</button>
     <button id="btnWatch" onclick="setView('watch')">Watch</button>
+    <button id="btnNarr" onclick="setView('narratives')">Narasi</button>
   </div>
   <div class="legend">
     <span><span class="badge safe">SAFE FILTER</span> risk LOW, bukan honeypot</span>
@@ -141,9 +142,11 @@ function setView(view) {
   document.getElementById("btnDiscovery").classList.toggle("active", view === "discovery");
   document.getElementById("btnBreakout").classList.toggle("active", view === "breakout");
   document.getElementById("btnWatch").classList.toggle("active", view === "watch");
+  document.getElementById("btnNarr").classList.toggle("active", view === "narratives");
   document.getElementById("sectionTitle").innerText =
     view === "discovery" ? "Discovery – Early Gems" :
     view === "watch" ? "Watch – token tersimpan" :
+    view === "narratives" ? "Narasi – klaster volume" :
     "Breakout – Revival / Momentum";
   refreshData();
 }
@@ -186,10 +189,32 @@ async function refreshData() {
     ? "/scan/top?limit=20&mode=" + document.getElementById("mode").value
     : currentView === "watch"
     ? "/scan/watch?limit=20"
+    : currentView === "narratives"
+    ? "/scan/narratives"
     : "/scan/breakout?limit=20";
   try {
     const res = await fetch(url);
-    const data = await res.json();
+    const raw = await res.json();
+    if (currentView === "narratives") {
+      if (!Array.isArray(raw) || !raw.length) {
+        status.innerText = "Belum ada klaster narasi";
+        return;
+      }
+      raw.forEach(n => {
+        const tr = document.createElement("tr");
+        const syms = (n.symbols || []).map(s => s.symbol).join(", ");
+        tr.innerHTML = `
+          <td colspan="2"><span class="badge safe">${n.narrative}</span></td>
+          <td colspan="3">${n.tokens} token · ${syms}</td>
+          <td colspan="3">Vol ${money(n.volume_24h)}</td>
+          <td colspan="3">Liq ${money(n.liquidity_usd)}</td>
+          <td colspan="4">MCap ${money(n.market_cap)}</td>`;
+        table.appendChild(tr);
+      });
+      status.innerText = "Narasi " + raw.length;
+      return;
+    }
+    const data = raw;
     if (!Array.isArray(data) || data.length === 0) {
       status.innerText = "No data found. Coba mode Aggressive.";
       return;
@@ -219,6 +244,7 @@ async function refreshData() {
         <td class="symbol">
           <a href="${dexUrl(item)}" target="_blank" rel="noreferrer">${item.symbol || "-"}</a>
           <div class="muted">${item.name || item.token_address || ""}</div>
+          <div class="muted">${item.narrative || ""}</div>
         </td>
         <td>${chainOf(item)}</td>
         <td>${item.score}</td>
