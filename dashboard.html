@@ -231,6 +231,38 @@ async function refreshData() {
       status.innerText = raw.error + " · " + (raw.address || "");
       return;
     }
+    if (currentView === "ca" && Array.isArray(raw)) {
+      raw.forEach(item => {
+        const rpt = item.ca_report || {};
+        const tw = String(rpt.trend_window || "WATCH");
+        const twClass = tw === "POSSIBLE" ? "safe" : tw === "AVOID" || tw === "UNLIKELY" ? "danger" : "warn";
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 18;
+        td.innerHTML = `<div class="whale-card">
+          <h3>${item.symbol || "-"} · ${chainOf(item)} · ${item.token_address || ""}</h3>
+          <p>
+            <span class="badge ${rpt.verified_profile ? "safe" : "unknown"}">${rpt.verified_profile ? "PROFIL ADA" : "PROFIL LEMAH"}</span>
+            <span class="badge ${rpt.not_honeypot ? "safe" : "danger"}">${rpt.not_honeypot ? "BUKAN HONEYPOT" : "HONEYPOT"}</span>
+            <span class="badge ${twClass}">TREND ${tw}</span>
+            <span class="badge ${upsideClass(item.upside)}">${item.upside || "-"}</span>
+          </p>
+          <p class="note-box">${rpt.trend_note || ""} · vol/liq ${rpt.vol_liq || "-"}x · 24h ${item.price_change_24h || 0}% · umur ${item.age_hours || "-"} jam</p>
+          <p class="note-box">${(rpt.checks || []).join(" · ")}</p>
+          <p class="muted">
+            Liq ${money(item.liquidity_usd)} · MCap ${money(item.market_cap)} · Vol ${money(item.volume_24h)}
+            · top1 ${item.top1_pct || 0}% · top10 ${item.top10_pct || 0}%
+            · <a href="${dexUrl(item)}" target="_blank" rel="noreferrer">Chart</a>
+            ${item.traders_url ? ' · <a href="'+item.traders_url+'" target="_blank" rel="noreferrer">Top Traders</a>' : ""}
+            ${item.fomo_url ? ' · <a href="'+item.fomo_url+'" target="_blank" rel="noreferrer">FOMO</a>' : ""}
+          </p>
+        </div>`;
+        tr.appendChild(td);
+        table.appendChild(tr);
+      });
+      status.innerText = "Analisa CA " + raw.length;
+      return;
+    }
     if (currentView === "whales") {
       if (!Array.isArray(raw) || !raw.length) {
         status.innerText = "Belum ada data whale flow";
