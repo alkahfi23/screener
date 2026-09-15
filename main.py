@@ -860,6 +860,36 @@ def scan_breakout(limit: int = 10):
         return []
 
 
+@app.get("/scan/ca")
+def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
+    """Analisa satu CA / mint. Tidak lewat filter umur."""
+    addr = address.strip()
+    if addr.startswith("0x") and len(addr) == 42:
+        addr = addr
+    try:
+        pairs = fetch_pairs_for_tokens([addr])
+        if chain:
+            want = chain.lower()
+            pairs = [p for p in pairs if (p.get("chainId") or "").lower() == want]
+        if not pairs:
+            return {"error": "pair tidak ketemu di DexScreener", "address": addr}
+        best = group_best_by_token(pairs)
+        rows = [enrich(p, False) for p in best.values()]
+        rows = attach_security(rows)
+        remember_tokens(rows)
+        for row in rows:
+            chain_l = str(row.get("chain") or "").lower()
+            pair = row.get("pair_address") or ""
+            if chain_l and pair:
+                row["traders_url"] = f"https://dexscreener.com/{chain_l}/{pair}"
+            row["fomo_url"] = fomo_url(row)
+            row["green_alert"] = is_green_signal(row)
+        return rows
+    except Exception as e:
+        print("CA SCAN ERROR:", e)
+        return {"error": str(e), "address": addr}
+
+
 @app.get("/scan/watch")
 def scan_watch(limit: int = 20):
     """Token yang pernah disimpan, termasuk yang sudah lewat 72 jam."""
