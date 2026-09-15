@@ -860,6 +860,91 @@ def scan_breakout(limit: int = 10):
         return []
 
 
+def ca_analysis(row: Dict) -> Dict:
+    """Saringan CA: verifikasi profil + bukan honeypot + peluang tape beberapa jam.
+    Bukan prediksi harga."""
+    flags = [str(f).upper() for f in (row.get("flags") or [])]
+    socials = row.get("socials") or []
+    sites = row.get("websites") or []
+    liq = float(row.get("liquidity_usd") or 0)
+    vol = float(row.get("volume_24h") or 0)
+    mcap = float(row.get("market_cap") or 0)
+    chg = float(row.get("price_change_24h") or 0)
+    age = row.get("age_hours")
+    try:
+        age = float(age) if age is not None else None
+    except (TypeError, ValueError):
+        age = None
+    vl = (vol / liq) if liq else 0
+    top10 = float(row.get("top10_pct") or 0)
+    honeypot = bool(row.get("honeypot") or row.get("risk") == "HONEYPOT")
+    checks = []
+
+    verified = bool(row.get("icon")) and (len(socials) + len(sites) >= 1)
+    if verified:
+        checks.append("profil Dex ada (icon + social/web)")
+    else:
+        checks.append("profil lemah / belum lengkap")
+
+    if honeypot or any("HONEYPOT" in f or "RUGGED" in f or "CANNOT_SELL" in f for f in flags):
+        checks.append("honeypot / rugged / cannot sell")
+        trend = "AVOID"
+        note = "jangan dipegang"
+    elif row.get("risk") == "HIGH":
+        checks.append("risk HIGH")
+        trend = "UNLIKELY"
+        note = "flag keamanan"
+    elif vl > 6 or str(row.get("upside") or "") in ("WASHY", "THIN", "NO UPSIDE"):
+        checks.append(f"tape panas vol/liq {vl:.1f}x")
+        trend = "UNLIKELY"
+        note = "sudah rame / washy — trending sudah terjadi"
+    elif chg >= 80:
+        checks.append(f"24h sudah +{chg:.0f}%")
+        trend = "UNLIKELY"
+        note = "momentum sudah jalan, risiko exit"
+    elif age is not None and age < 1:
+        checks.append(f"umur {age:.1f} jam — terlalu baru")
+        trend = "WATCH"
+        note = "launch candle, pantau dulu"
+    elif age is not None and age > 96:
+        checks.append(f"umur {age:.0f} jam")
+        trend = "WATCH"
+        note = "bukan early window"
+    elif liq < 15000 or mcap < 20000:
+        checks.append("liq/mcap tipis")
+        trend = "WATCH"
+        note = "mudah disapu"
+    elif (
+        row.get("risk") in ("LOW", None, "")
+        and not honeypot
+        and 0.3 <= vl <= 4
+        and 5 <= chg <= 45
+        and (age is None or 2 <= age <= 72)
+        and top10 < 45
+    ):
+        checks.append("bukan honeypot, tape masih waras, 24h belum gila")
+        trend = "POSSIBLE"
+        note = "bisa ramai beberapa jam — spekulatif, bukan jaminan"
+    else:
+        checks.append("campuran: belum rapi untuk window beberapa jam")
+        trend = "WATCH"
+        note = "boleh dipantau, jangan anggap trending"
+
+    if top10 >= 50:
+        checks.append(f"top10 {top10}% terkonsentrasi")
+    if row.get("chain") in ("ROBINHOOD", "robinhood") and top10 == 0:
+        checks.append("holder Robinhood kosong — verifikasi dangkal")
+
+    return {
+        "verified_profile": verified,
+        "not_honeypot": not honeypot,
+        "trend_window": trend,
+        "trend_note": note,
+        "checks": checks,
+        "vol_liq": round(vl, 2),
+    }
+
+
 @app.get("/scan/ca")
 def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
     """Analisa satu CA / mint. Tidak lewat filter umur."""
@@ -884,6 +969,7 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
                 row["traders_url"] = f"https://dexscreener.com/{chain_l}/{pair}"
             row["fomo_url"] = fomo_url(row)
             row["green_alert"] = is_green_signal(row)
+            row["ca_report"] = ca_analysis(row)
         return rows
     except Exception as e:
         print("CA SCAN ERROR:", e)
