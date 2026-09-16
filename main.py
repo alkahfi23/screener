@@ -1086,8 +1086,11 @@ def ca_analysis(row: Dict) -> Dict:
 def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
     """Analisa satu CA / mint. Tidak lewat filter umur."""
     addr = address.strip()
-    if addr.startswith("0x") and len(addr) == 42:
-        addr = addr
+    if addr.startswith("0x"):
+        if len(addr) != 42:
+            return {"error": "CA EVM harus 42 karakter (0x + 40 hex). Yang ditempel kepotong.", "address": addr}
+    elif len(addr) < 32:
+        return {"error": "CA / mint terlalu pendek. Tempel address penuh.", "address": addr}
     try:
         pairs = fetch_pairs_for_tokens([addr])
         want_addr = addr.lower()
@@ -1111,7 +1114,10 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
         if pair_hits:
             pairs = pair_hits
         best = group_best_by_token(pairs)
-        rows = [enrich(p, False) for p in best.values()]
+        picked = list(best.values())
+        if len(picked) > 1:
+            picked = [sorted(picked, key=lambda p: num(p, "liquidity", "usd"), reverse=True)[0]]
+        rows = [enrich(p, False) for p in picked]
         rows = attach_security(rows)
         remember_tokens(rows)
         for row in rows:
@@ -1805,4 +1811,4 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
