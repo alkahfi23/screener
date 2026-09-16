@@ -462,14 +462,20 @@ def confidence_score(base_score: int, whale: Optional[str], pressure_bonus: int,
 
 
 NARRATIVE_RULES = [
-    ("AI / AGENT", ("ai", "agent", "gpt", "llm", "neural", "robot", "agi", "flyai", "finch")),
-    ("CAT / MEME ANIMAL", ("cat", "kitten", "purr", "meow", "doge", "dog", "squirrel", "ape", "frog", "pepe", "inu", "monkey", "trump")),
-    ("PUMP.FUN", ("pump", "bonk", "bags")),
+    ("MEME", ("meme", "pepe", "doge", "dog", "cat", "kitten", "inu", "frog", "ape", "monkey", "wojak", "bonk", "wif", "popcat", "squirrel", "banger", "stunk", "pumpdog")),
+    ("DEFI", ("defi", "swap", "lend", "borrow", "yield", "vault", "amm", "dex", "liquidity", "aave", "morpho")),
+    ("RWA", ("rwa", "real world", "treasury", "bond", "tokenized", "stock", "nasdaq", "gold", "commodity")),
+    ("DEPIN", ("depin", "compute", "bandwidth", "sensor", "wireless", "helium", "render")),
+    ("AI / AGENT", ("ai", "agent", "gpt", "llm", "neural", "agi", "inference", "model", "flyai", "finch")),
+    ("PREDICTION", ("predict", "polymarket", "kalshi", "odds", "bet", "forecast")),
+    ("PERPS / DERIV", ("perp", "perps", "future", "derivative", "leverage", "hyperliquid")),
+    ("PRIVACY / ZK", ("priv", "privacy", "zk", "zero knowledge", "shield", "anon", "mixer")),
+    ("GAMING", ("game", "gaming", "play", "quest", "xp", "nft game")),
+    ("STABLECOIN", ("usd", "stable", "usdc", "usdt", "dai", "depeg")),
+    ("BTCFI", ("btc", "bitcoin", "ordinal", "runes", "btcfi")),
+    ("LAUNCHPAD", ("pump", "pumpfun", "pumpswap", "launchpad", "fair launch", "bags")),
+    ("POLITICS", ("trump", "maga", "potus", "election", "vote")),
     ("ROBINHOOD CHAIN", ("robinhood",)),
-    ("PRIVACY", ("priv", "privat", "zk", "shield", "anon")),
-    ("GAMING", ("game", "play", "xp", "quest", "life is a game")),
-    ("POLITICS / TRUMP", ("trump", "maga", "trumpy", "potus")),
-    ("STOCK / RWA", ("stock", "nasdaq", "tokenized", "rwa", "treasury")),
 ]
 
 
@@ -1276,8 +1282,8 @@ def scan_narratives():
         vol = float(b["volume_24h"] or 0)
         liq = float(b["liquidity_usd"] or 0)
         vl = (vol / liq) if liq else 0
-        chgs = [float(s.get("price_change_24h") or 0) for s in b["symbols"]]
-        avg_chg = sum(chgs) / len(chgs) if chgs else 0
+        chgs = sorted(float(s.get("price_change_24h") or 0) for s in b["symbols"])
+        avg_chg = chgs[len(chgs)//2] if chgs else 0
         heat = min(100, int(min(vol / 50_000, 40) + min(vl * 8, 35) + min(max(avg_chg, 0) / 4, 25)))
         if vl > 6:
             regime = "BLOW-OFF"
