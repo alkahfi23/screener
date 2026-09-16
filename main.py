@@ -463,51 +463,46 @@ def confidence_score(base_score: int, whale: Optional[str], pressure_bonus: int,
 
 NARRATIVE_RULES = [
     ("MEME", ("meme", "pepe", "doge", "dog", "cat", "kitten", "inu", "frog", "ape", "monkey", "wojak", "bonk", "wif", "popcat", "squirrel", "banger", "stunk", "pumpdog")),
-    ("DEFI", ("defi", "swap", "lend", "borrow", "yield", "vault", "amm", "dex", "liquidity", "aave", "morpho")),
-    ("RWA", ("rwa", "real world", "treasury", "bond", "tokenized", "stock", "nasdaq", "gold", "commodity")),
-    ("DEPIN", ("depin", "compute", "bandwidth", "sensor", "wireless", "helium", "render")),
-    ("AI / AGENT", ("ai", "agent", "gpt", "llm", "neural", "agi", "inference", "model", "flyai", "finch")),
-    ("PREDICTION", ("predict", "polymarket", "kalshi", "odds", "bet", "forecast")),
-    ("PERPS / DERIV", ("perp", "perps", "future", "derivative", "leverage", "hyperliquid")),
-    ("PRIVACY / ZK", ("priv", "privacy", "zk", "zero knowledge", "shield", "anon", "mixer")),
-    ("GAMING", ("game", "gaming", "play", "quest", "xp", "nft game")),
-    ("STABLECOIN", ("usd", "stable", "usdc", "usdt", "dai", "depeg")),
-    ("BTCFI", ("btc", "bitcoin", "ordinal", "runes", "btcfi")),
-    ("LAUNCHPAD", ("pump", "pumpfun", "pumpswap", "launchpad", "fair launch", "bags")),
+    ("DEFI", ("defi", "yield farm", "lending", "borrow", "vault", "aave", "morpho")),
+    ("RWA", ("rwa", "real-world", "treasury", "tokenized stock", "nasdaq", "commodity")),
+    ("DEPIN", ("depin", "helium", "render network")),
+    ("AI / AGENT", (" ai", "ai ", "agent", "gpt", "llm", "agi", "flyai", "finch")),
+    ("PREDICTION", ("polymarket", "kalshi", "prediction")),
+    ("PERPS / DERIV", ("perp", "perps", "hyperliquid")),
+    ("PRIVACY / ZK", ("privacy", " zk", "zk ", "zkats", "anon")),
+    ("GAMING", ("gaming", "gamefi", "play2earn")),
+    ("STABLECOIN", ("stablecoin", "usdc", "usdt", "dai ")),
+    ("BTCFI", ("btcfi", "ordinals", "runes")),
+    ("LAUNCHPAD", ("pump.fun", "pumpfun", "launchpad", "fairlaunch")),
     ("POLITICS", ("trump", "maga", "potus", "election", "vote")),
     ("ROBINHOOD CHAIN", ("robinhood",)),
 ]
 
 
 def detect_narrative(row_or_pair: Dict) -> str:
-    parts = []
     if "baseToken" in row_or_pair:
         base = row_or_pair.get("baseToken") or {}
-        parts += [base.get("symbol"), base.get("name"), row_or_pair.get("chainId")]
-        info = row_or_pair.get("info") or {}
-        for s in info.get("socials") or []:
-            parts.append((s or {}).get("url"))
-        for w in info.get("websites") or []:
-            parts.append(w if isinstance(w, str) else (w or {}).get("url"))
+        symbol = base.get("symbol") or ""
+        name = base.get("name") or ""
+        chain = row_or_pair.get("chainId") or ""
+        dex = row_or_pair.get("dexId") or ""
     else:
-        parts += [
-            row_or_pair.get("symbol"),
-            row_or_pair.get("name"),
-            row_or_pair.get("chain"),
-            row_or_pair.get("dex"),
-        ]
-        for s in row_or_pair.get("socials") or []:
-            parts.append((s or {}).get("url"))
-        for w in row_or_pair.get("websites") or []:
-            parts.append(w)
-    blob = " ".join(str(x or "") for x in parts).lower()
+        symbol = row_or_pair.get("symbol") or ""
+        name = row_or_pair.get("name") or ""
+        chain = row_or_pair.get("chain") or ""
+        dex = row_or_pair.get("dex") or ""
+    blob = f" {symbol} {name} {chain} ".lower()
     hits = []
     for label, keys in NARRATIVE_RULES:
-        if any(k in blob for k in keys):
+        if any(k.lower() in blob for k in keys):
             hits.append(label)
-    if "robinhood" in blob and "ROBINHOOD CHAIN" not in hits:
+    dex_l = str(dex).lower()
+    chain_l = str(chain).lower()
+    if chain_l == "robinhood" and "ROBINHOOD CHAIN" not in hits:
         hits.append("ROBINHOOD CHAIN")
-    return " · ".join(hits[:3]) if hits else "UNLABELED"
+    if dex_l in ("pumpswap", "pumpfun", "raydium") and "LAUNCHPAD" not in hits and "MEME" in hits:
+        hits.append("LAUNCHPAD")
+    return " · ".join(hits[:2]) if hits else "UNLABELED"
 
 
 def enrich(p: Dict, is_breakout: bool = False) -> Dict:
@@ -1267,10 +1262,14 @@ def scan_narratives():
             b["liquidity_usd"] += float(r.get("liquidity_usd") or 0)
             b["market_cap"] += float(r.get("market_cap") or 0)
             if r.get("symbol"):
+                liq_r = float(r.get("liquidity_usd") or 0)
+                vol_r = float(r.get("volume_24h") or 0)
                 b["symbols"].append({
                     "symbol": r.get("symbol"),
                     "chain": r.get("chain"),
-                    "volume_24h": r.get("volume_24h"),
+                    "volume_24h": vol_r,
+                    "liquidity_usd": liq_r,
+                    "vol_liq": round((vol_r / liq_r), 2) if liq_r else 0,
                     "market_cap": r.get("market_cap"),
                     "price_change_24h": r.get("price_change_24h"),
                     "upside": r.get("upside"),
@@ -1281,17 +1280,18 @@ def scan_narratives():
     for b in out:
         vol = float(b["volume_24h"] or 0)
         liq = float(b["liquidity_usd"] or 0)
-        vl = (vol / liq) if liq else 0
+        vls = sorted(float(s.get("vol_liq") or 0) for s in b["symbols"])
+        vl = vls[len(vls)//2] if vls else ((vol / liq) if liq else 0)
         chgs = sorted(float(s.get("price_change_24h") or 0) for s in b["symbols"])
         avg_chg = chgs[len(chgs)//2] if chgs else 0
-        heat = min(100, int(min(vol / 50_000, 40) + min(vl * 8, 35) + min(max(avg_chg, 0) / 4, 25)))
-        if vl > 6:
+        heat = min(100, int(min(vol / 80_000, 35) + min(vl * 6, 30) + min(max(avg_chg, 0) / 5, 20) + min(b["tokens"] * 3, 15)))
+        if vl > 8 and avg_chg > 80:
             regime = "BLOW-OFF"
-        elif vl >= 2 and avg_chg >= 15:
+        elif vl >= 3 and avg_chg >= 20:
             regime = "HEATING"
-        elif vl >= 0.5 and 5 <= avg_chg <= 45:
+        elif 0.4 <= vl <= 4 and 5 <= avg_chg <= 45:
             regime = "BUILDING"
-        elif avg_chg < 0:
+        elif avg_chg < -10:
             regime = "COOLING"
         else:
             regime = "QUIET"
