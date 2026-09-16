@@ -1090,11 +1090,26 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
         addr = addr
     try:
         pairs = fetch_pairs_for_tokens([addr])
-        if chain:
-            want = chain.lower()
-            pairs = [p for p in pairs if (p.get("chainId") or "").lower() == want]
+        want_addr = addr.lower()
+        matched = []
+        for p in pairs:
+            if chain and (p.get("chainId") or "").lower() != chain.lower():
+                continue
+            base = ((p.get("baseToken") or {}).get("address") or "").lower()
+            quote = ((p.get("quoteToken") or {}).get("address") or "").lower()
+            pair = (p.get("pairAddress") or "").lower()
+            if want_addr in (base, quote, pair):
+                matched.append(p)
+        pairs = matched
         if not pairs:
             return {"error": "pair tidak ketemu di DexScreener", "address": addr}
+        # satu mint: kalau user tempel CA token, kunci ke base=CA
+        base_hits = [p for p in pairs if ((p.get("baseToken") or {}).get("address") or "").lower() == want_addr]
+        if base_hits:
+            pairs = base_hits
+        pair_hits = [p for p in pairs if (p.get("pairAddress") or "").lower() == want_addr]
+        if pair_hits:
+            pairs = pair_hits
         best = group_best_by_token(pairs)
         rows = [enrich(p, False) for p in best.values()]
         rows = attach_security(rows)
@@ -1790,4 +1805,4 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True
