@@ -344,8 +344,12 @@ async function refreshData() {
       return;
     }
     if (currentView === "ca" && Array.isArray(raw)) {
-      raw.forEach(item => table.appendChild(renderCaDash(item)));
-      status.innerText = "Analisa CA " + raw.length;
+      if (!raw.length) {
+        status.innerText = "CA tidak ketemu";
+        return;
+      }
+      table.appendChild(renderCaDash(raw[0]));
+      status.innerText = "Analisa 1 CA · " + (raw[0].symbol || "");
       return;
     }
     if (currentView === "cart") {
