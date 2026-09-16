@@ -980,10 +980,19 @@ def ca_analysis(row: Dict) -> Dict:
     else:
         checks.append("profil lemah / belum lengkap")
 
+    rh_empty = str(row.get("chain") or "").upper() in ("ROBINHOOD",) and top10 <= 0
     if honeypot or any("HONEYPOT" in f or "RUGGED" in f or "CANNOT_SELL" in f for f in flags):
         checks.append("honeypot / rugged / cannot sell")
         trend = "AVOID"
         note = "jangan dipegang"
+    elif chg <= -40:
+        checks.append(f"24h {chg:.0f}% — dump dalam")
+        trend = "UNLIKELY"
+        note = "harga sudah pecah, bukan window naik"
+    elif chg <= -15:
+        checks.append(f"24h {chg:.0f}% — retrace")
+        trend = "WATCH"
+        note = "masih turun, jangan baca sebagai trending"
     elif row.get("risk") == "HIGH":
         checks.append("risk HIGH")
         trend = "UNLIKELY"
@@ -1011,23 +1020,54 @@ def ca_analysis(row: Dict) -> Dict:
     elif (
         row.get("risk") in ("LOW", None, "")
         and not honeypot
+        and not rh_empty
         and 0.3 <= vl <= 4
-        and 5 <= chg <= 45
-        and (age is None or 2 <= age <= 72)
-        and top10 < 45
+        and 8 <= chg <= 40
+        and age is not None and 3 <= age <= 48
+        and top10 < 40
     ):
-        checks.append("bukan honeypot, tape masih waras, 24h belum gila")
+        checks.append("tape waras, 24h plus kecil, umur masih window")
         trend = "POSSIBLE"
-        note = "bisa ramai beberapa jam — spekulatif, bukan jaminan"
+        note = "spekulatif — bukan jaminan naik"
     else:
-        checks.append("campuran: belum rapi untuk window beberapa jam")
+        checks.append("belum rapi untuk window beberapa jam")
         trend = "WATCH"
-        note = "boleh dipantau, jangan anggap trending"
+        note = "pantau, jangan anggap trending"
 
     if top10 >= 50:
         checks.append(f"top10 {top10}% terkonsentrasi")
-    if row.get("chain") in ("ROBINHOOD", "robinhood") and top10 == 0:
+    if rh_empty:
         checks.append("holder Robinhood kosong — verifikasi dangkal")
+
+    # Gauge: arah harga masuk hitungan
+    health = 55
+    if 0.4 <= vl <= 3.5:
+        health += 20
+    elif vl > 6:
+        health -= 25
+    if chg <= -40:
+        health -= 35
+    elif chg <= -15:
+        health -= 20
+    elif 8 <= chg <= 40:
+        health += 15
+    elif chg >= 80:
+        health -= 15
+    health = max(5, min(92, health))
+
+    safety = 70 if not honeypot else 8
+    if row.get("risk") == "HIGH":
+        safety = 25
+    if rh_empty:
+        safety = min(safety, 42)
+    if flags:
+        safety = min(safety, 50)
+    if chg <= -40:
+        safety = min(safety, 40)
+
+    trend_score = {"POSSIBLE": 72, "WATCH": 38, "UNLIKELY": 16, "AVOID": 6}.get(trend, 30)
+    if chg < 0:
+        trend_score = min(trend_score, 28)
 
     return {
         "verified_profile": verified,
@@ -1036,6 +1076,9 @@ def ca_analysis(row: Dict) -> Dict:
         "trend_note": note,
         "checks": checks,
         "vol_liq": round(vl, 2),
+        "health_score": health,
+        "safety_score": safety,
+        "trend_score": trend_score,
     }
 
 
