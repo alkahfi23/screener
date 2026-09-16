@@ -113,6 +113,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
     <button id="btnWatch" onclick="setView('watch')">Watch</button>
     <button id="btnNarr" onclick="setView('narratives')">Narasi</button>
     <button id="btnWhales" onclick="setView('whales')">Whale Flow</button>
+    <button id="btnCart" onclick="setView('cart')">Keranjang</button>
     <button id="btnCa" onclick="setView('ca')">Analisa CA</button>
     <input id="caInput" type="text" placeholder="Tempel CA / mint" style="min-width:280px;background:#0b1220;color:#e5e7eb;border:1px solid #1e293b;padding:10px 14px;border-radius:8px;" />
     <select id="caChain">
@@ -184,6 +185,7 @@ function setView(view) {
   document.getElementById("btnWatch").classList.toggle("active", view === "watch");
   document.getElementById("btnNarr").classList.toggle("active", view === "narratives");
   document.getElementById("btnWhales").classList.toggle("active", view === "whales");
+  document.getElementById("btnCart").classList.toggle("active", view === "cart");
   document.getElementById("btnCa").classList.toggle("active", view === "ca");
   document.getElementById("sectionTitle").innerText =
     view === "discovery" ? "Discovery – Early Gems" :
@@ -191,6 +193,7 @@ function setView(view) {
     view === "narratives" ? "Narasi – klaster volume" :
     view === "whales" ? "Whale Flow – pergeseran tape" :
     view === "ca" ? "Analisa CA / Token" :
+    view === "cart" ? "Keranjang – pantau harga" :
     "Breakout – Revival / Momentum";
   refreshData();
 }
@@ -298,6 +301,7 @@ function renderCaDash(item) {
       <a href="${dexUrl(item)}" target="_blank" rel="noreferrer">Chart Dex</a>
       ${item.traders_url ? `<a href="${item.traders_url}" target="_blank" rel="noreferrer">Top Traders</a>` : ""}
       ${item.fomo_url ? `<a href="${item.fomo_url}" target="_blank" rel="noreferrer">Trade FOMO</a>` : ""}
+      <button class="primary" onclick="addToCart('${(item.token_address || "").replace(/'/g, "")}', '${chainOf(item).toLowerCase()}')">+ Keranjang</button>
     </div>
   </div>`;
   tr.appendChild(td);
@@ -319,6 +323,8 @@ async function refreshData() {
     : currentView === "ca"
     ? "/scan/ca?address=" + encodeURIComponent((document.getElementById("caInput").value || "").trim())
       + (document.getElementById("caChain").value ? "&chain=" + document.getElementById("caChain").value : "")
+    : currentView === "cart"
+    ? "/cart"
     : "/scan/breakout?limit=20";
   try {
     const res = await fetch(url);
@@ -330,6 +336,35 @@ async function refreshData() {
     if (currentView === "ca" && Array.isArray(raw)) {
       raw.forEach(item => table.appendChild(renderCaDash(item)));
       status.innerText = "Analisa CA " + raw.length;
+      return;
+    }
+    if (currentView === "cart") {
+      if (!Array.isArray(raw) || !raw.length) {
+        status.innerText = "Keranjang kosong. Analisa CA dulu, lalu + Keranjang.";
+        return;
+      }
+      raw.forEach(item => {
+        const tr = document.createElement("tr");
+        const pct = (v) => {
+          if (v === null || v === undefined || v === "") return '<span class="muted">nanti</span>';
+          const n = Number(v);
+          const col = n >= 0 ? "#4ade80" : "#f87171";
+          return `<b style="color:${col}">${n.toFixed(2)}%</b>`;
+        };
+        tr.innerHTML = `
+          <td colspan="2"><span class="badge safe">${item.symbol || "-"}</span><div class="muted">${chainOf(item)} · ${Math.round(item.watch_min || 0)} mnt</div></td>
+          <td colspan="2">${item.price_usd || "-"}</td>
+          <td>5m ${pct(item.chg_5m)}</td>
+          <td>15m ${pct(item.chg_15m)}</td>
+          <td>30m ${pct(item.chg_30m)}</td>
+          <td>1h ${pct(item.chg_1h)}</td>
+          <td>24h ${pct(item.chg_24h)}</td>
+          <td colspan="2">dari masuk ${pct(item.chg_since_add)}</td>
+          <td colspan="2"><a href="${dexUrl(item)}" target="_blank" rel="noreferrer">Chart</a>
+            <button onclick="removeCart('${(item.token_address || "").replace(/'/g, "")}', '${chainOf(item).toLowerCase()}')">Hapus</button></td>`;
+        table.appendChild(tr);
+      });
+      status.innerText = "Keranjang " + raw.length + " · refresh ~1 menit";
       return;
     }
     if (currentView === "whales") {
@@ -469,9 +504,20 @@ async function pollWorker() {
     document.getElementById("workerText").textContent = "background: server tidak merespon";
   }
 }
+async function addToCart(address, chain) {
+  if (!address) return;
+  const res = await fetch("/cart/add?address=" + encodeURIComponent(address) + "&chain=" + encodeURIComponent(chain || ""));
+  const data = await res.json();
+  document.getElementById("status").innerText = data.error || ("Masuk keranjang: " + (data.added || []).join(", "));
+}
+async function removeCart(address, chain) {
+  await fetch("/cart/remove?address=" + encodeURIComponent(address) + "&chain=" + encodeURIComponent(chain || ""));
+  refreshData();
+}
 refreshData();
 pollWorker();
 setInterval(pollWorker, 5000);
+setInterval(() => { if (currentView === "cart") refreshData(); }, 60000);
 </script>
 </body>
 </html>
