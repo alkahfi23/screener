@@ -1225,17 +1225,38 @@ def scan_narratives():
                     "chain": r.get("chain"),
                     "volume_24h": r.get("volume_24h"),
                     "market_cap": r.get("market_cap"),
+                    "price_change_24h": r.get("price_change_24h"),
                     "upside": r.get("upside"),
                     "risk": r.get("risk"),
                     "url": r.get("url"),
                 })
     out = sorted(buckets.values(), key=lambda x: x["volume_24h"], reverse=True)
     for b in out:
-        b["volume_24h"] = round(b["volume_24h"], 2)
-        b["liquidity_usd"] = round(b["liquidity_usd"], 2)
-        b["market_cap"] = round(b["market_cap"], 2)
+        vol = float(b["volume_24h"] or 0)
+        liq = float(b["liquidity_usd"] or 0)
+        vl = (vol / liq) if liq else 0
+        chgs = [float(s.get("price_change_24h") or 0) for s in b["symbols"]]
+        avg_chg = sum(chgs) / len(chgs) if chgs else 0
+        heat = min(100, int(min(vol / 50_000, 40) + min(vl * 8, 35) + min(max(avg_chg, 0) / 4, 25)))
+        if vl > 6:
+            regime = "BLOW-OFF"
+        elif vl >= 2 and avg_chg >= 15:
+            regime = "HEATING"
+        elif vl >= 0.5 and 5 <= avg_chg <= 45:
+            regime = "BUILDING"
+        elif avg_chg < 0:
+            regime = "COOLING"
+        else:
+            regime = "QUIET"
+        b["volume_24h"] = round(vol, 2)
+        b["liquidity_usd"] = round(liq, 2)
+        b["market_cap"] = round(float(b["market_cap"] or 0), 2)
+        b["vol_liq"] = round(vl, 2)
+        b["avg_change_24h"] = round(avg_chg, 2)
+        b["heat"] = heat
+        b["regime"] = regime
         b["symbols"] = sorted(b["symbols"], key=lambda x: float(x.get("volume_24h") or 0), reverse=True)[:8]
-    return out
+    return sorted(out, key=lambda x: (-x.get("heat", 0), -x.get("volume_24h", 0)))
 
 
 @app.get("/ui")
