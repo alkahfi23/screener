@@ -47,8 +47,10 @@ SESSION.headers.update({"Accept": "application/json", "User-Agent": "gem-scanner
 DATA_DIR = os.getenv("DATA_DIR", BASE_DIR)
 os.makedirs(DATA_DIR, exist_ok=True)
 WATCH_FILE = os.path.join(DATA_DIR, "watchlist.json")
+CART_FILE = os.path.join(DATA_DIR, "cart.json")
 WATCH_MAX_AGE_HOURS = 14 * 24
 WATCH_LOCK = threading.Lock()
+CART_LOCK = threading.Lock()
 
 
 def load_watch() -> Dict[str, Dict]:
@@ -68,6 +70,53 @@ def save_watch(data: Dict[str, Dict]) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, WATCH_FILE)
+
+
+def load_cart() -> Dict[str, Dict]:
+    if not os.path.exists(CART_FILE):
+        return {}
+    try:
+        with open(CART_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("cart load error:", e)
+        return {}
+
+
+def save_cart(data: Dict[str, Dict]) -> None:
+    tmp = CART_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CART_FILE)
+
+
+def _price_float(v) -> Optional[float]:
+    try:
+        x = float(v)
+        return x if x > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _chg_from_snaps(snaps: List[Dict], now: float, minutes: int, now_price: Optional[float]) -> Optional[float]:
+    if not now_price:
+        return None
+    target = now - minutes * 60
+    best = None
+    best_dt = 10**18
+    for s in snaps:
+        ts = float(s.get("ts") or 0)
+        px = _price_float(s.get("price"))
+        if not ts or not px:
+            continue
+        dt = abs(ts - target)
+        if dt < best_dt:
+            best_dt = dt
+            best = px
+    if best is None or best_dt > minutes * 60 * 0.7:
+        return None
+    return round((now_price / best - 1) * 100, 2)
 
 
 def remembered_addresses() -> List[str]:
@@ -459,6 +508,9 @@ def enrich(p: Dict, is_breakout: bool = False) -> Dict:
         "liquidity_usd": round(liq, 2),
         "market_cap": mcap,
         "volume_24h": round(vol, 2),
+        "price_usd": p.get("priceUsd"),
+        "price_change_m5": round(num(p, "priceChange", "m5"), 2),
+        "price_change_h1": round(num(p, "priceChange", "h1"), 2),
         "price_change_24h": round(num(p, "priceChange", "h24"), 2),
         "age_hours": round(age, 2) if age is not None else None,
         "pair_address": p.get("pairAddress"),
@@ -974,6 +1026,116 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
     except Exception as e:
         print("CA SCAN ERROR:", e)
         return {"error": str(e), "address": addr}
+
+
+@app.get("/cart/add")
+def cart_add(address: str = Query(..., min_length=8), chain: str = Query("")):
+    rows = scan_ca(address=address, chain=chain)
+    if isinstance(rows, dict) and rows.get("error"):
+        return rows
+    now = time.time()
+    with CART_LOCK:
+        cart = load_cart()
+        for row in rows:
+            addr = row.get("token_address") or address
+            ch = (row.get("chain") or chain or "").lower()
+            key = f"{ch}:{addr.lower()}"
+            prev = cart.get(key) or {}
+            px = _price_float(row.get("price_usd"))
+            snaps = list(prev.get("snapshots") or [])
+            if px:
+                snaps.append({"ts": now, "price": px})
+            snaps = snaps[-400:]
+            cart[key] = {
+                "token_address": addr,
+                "chain": ch,
+                "symbol": row.get("symbol"),
+                "name": row.get("name"),
+                "pair_address": row.get("pair_address"),
+                "url": row.get("url"),
+                "icon": row.get("icon"),
+                "added_at": prev.get("added_at") or now,
+                "first_price": prev.get("first_price") or px,
+                "snapshots": snaps,
+            }
+        save_cart(cart)
+    return {"ok": True, "count": len(load_cart()), "added": [r.get("symbol") for r in rows]}
+
+
+@app.get("/cart/remove")
+def cart_remove(address: str = Query(...), chain: str = Query("")):
+    key = f"{chain.lower()}:{(address or '').lower()}"
+    with CART_LOCK:
+        cart = load_cart()
+        cart.pop(key, None)
+        # also try without chain match
+        if key not in cart:
+            for k in list(cart.keys()):
+                if k.endswith(":" + address.lower()):
+                    cart.pop(k, None)
+        save_cart(cart)
+    return {"ok": True, "count": len(cart)}
+
+
+@app.get("/cart")
+def cart_list():
+    cart = load_cart()
+    if not cart:
+        return []
+    addrs = []
+    for rec in cart.values():
+        if rec.get("token_address"):
+            addrs.append(rec["token_address"])
+    pairs = fetch_pairs_for_tokens(addrs) if addrs else []
+    best = group_best_by_token(pairs)
+    now = time.time()
+    out = []
+    with CART_LOCK:
+        cart = load_cart()
+        for key, rec in cart.items():
+            p = best.get(key)
+            if not p:
+                # try any pair for this mint
+                mint = (rec.get("token_address") or "").lower()
+                for k2, pv in best.items():
+                    if k2.endswith(":" + mint):
+                        p = pv
+                        break
+            row = enrich(p, False) if p else {
+                "symbol": rec.get("symbol"),
+                "name": rec.get("name"),
+                "token_address": rec.get("token_address"),
+                "chain": (rec.get("chain") or "").upper(),
+                "url": rec.get("url"),
+                "icon": rec.get("icon"),
+                "price_usd": None,
+            }
+            px = _price_float(row.get("price_usd"))
+            snaps = list(rec.get("snapshots") or [])
+            if px:
+                snaps.append({"ts": now, "price": px})
+                snaps = snaps[-400:]
+                rec["snapshots"] = snaps
+                rec["last_price"] = px
+            first = _price_float(rec.get("first_price")) or (snaps[0].get("price") if snaps else None)
+            since_add = None
+            if first and px:
+                since_add = round((px / float(first) - 1) * 100, 2)
+            row["added_at"] = rec.get("added_at")
+            row["watch_min"] = round((now - float(rec.get("added_at") or now)) / 60, 1)
+            row["chg_since_add"] = since_add
+            row["chg_5m"] = _chg_from_snaps(snaps, now, 5, px)
+            if row.get("chg_5m") is None:
+                row["chg_5m"] = row.get("price_change_m5")
+            row["chg_15m"] = _chg_from_snaps(snaps, now, 15, px)
+            row["chg_30m"] = _chg_from_snaps(snaps, now, 30, px)
+            row["chg_1h"] = _chg_from_snaps(snaps, now, 60, px)
+            if row.get("chg_1h") is None:
+                row["chg_1h"] = row.get("price_change_h1")
+            row["chg_24h"] = row.get("price_change_24h")
+            out.append(row)
+        save_cart(cart)
+    return out
 
 
 @app.get("/scan/watch")
