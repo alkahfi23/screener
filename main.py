@@ -48,9 +48,11 @@ DATA_DIR = os.getenv("DATA_DIR", BASE_DIR)
 os.makedirs(DATA_DIR, exist_ok=True)
 WATCH_FILE = os.path.join(DATA_DIR, "watchlist.json")
 CART_FILE = os.path.join(DATA_DIR, "cart.json")
+WALLET_FILE = os.path.join(DATA_DIR, "wallets.json")
 WATCH_MAX_AGE_HOURS = 14 * 24
 WATCH_LOCK = threading.Lock()
 CART_LOCK = threading.Lock()
+WALLET_LOCK = threading.Lock()
 
 
 def load_watch() -> Dict[str, Dict]:
@@ -89,6 +91,45 @@ def save_cart(data: Dict[str, Dict]) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, CART_FILE)
+
+
+def load_wallets() -> Dict[str, Dict]:
+    if not os.path.exists(WALLET_FILE):
+        return {}
+    try:
+        with open(WALLET_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("wallet load error:", e)
+        return {}
+
+
+def save_wallets(data: Dict[str, Dict]) -> None:
+    tmp = WALLET_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, WALLET_FILE)
+
+
+def wallet_links(addr: str, chain: str) -> Dict[str, str]:
+    a = (addr or "").strip()
+    c = (chain or "solana").lower()
+    links = {
+        "dex": f"https://dexscreener.com/{c}/{a}",
+        "gmgn": "",
+        "explorer": "",
+    }
+    if c == "solana":
+        links["gmgn"] = f"https://gmgn.ai/sol/address/{a}"
+        links["explorer"] = f"https://solscan.io/account/{a}"
+    elif c == "robinhood":
+        links["explorer"] = f"https://explorer.robinhood.com/address/{a}"
+        links["gmgn"] = f"https://gmgn.ai/base/address/{a}"
+    else:
+        links["gmgn"] = f"https://gmgn.ai/{c}/address/{a}"
+        links["explorer"] = f"https://blockscan.com/address/{a}"
+    return links
 
 
 def _price_float(v) -> Optional[float]:
@@ -1259,6 +1300,68 @@ def scan_narratives():
     return sorted(out, key=lambda x: (-x.get("heat", 0), -x.get("volume_24h", 0)))
 
 
+@app.get("/whales/wallets")
+def whales_wallets():
+    return list(load_wallets().values())
+
+
+@app.get("/whales/add")
+def whales_add(address: str = Query(..., min_length=8), chain: str = Query("solana"), note: str = Query("")):
+    addr = address.strip()
+    ch = (chain or "solana").lower()
+    key = f"{ch}:{addr.lower()}"
+    with WALLET_LOCK:
+        data = load_wallets()
+        prev = data.get(key) or {}
+        data[key] = {
+            "address": addr,
+            "chain": ch,
+            "note": note or prev.get("note") or "",
+            "added_at": prev.get("added_at") or time.time(),
+            "links": wallet_links(addr, ch),
+        }
+        save_wallets(data)
+    return {"ok": True, "wallet": data[key], "count": len(data)}
+
+
+@app.get("/whales/remove")
+def whales_remove(address: str = Query(...), chain: str = Query("solana")):
+    key = f"{chain.lower()}:{address.lower()}"
+    with WALLET_LOCK:
+        data = load_wallets()
+        data.pop(key, None)
+        save_wallets(data)
+    return {"ok": True, "count": len(data)}
+
+
+@app.get("/scan/whales")
+def scan_whales():
+    clusters = scan_narratives()
+    leaders = []
+    for b in clusters:
+        for s in b.get("symbols") or []:
+            chain = str(s.get("chain") or "").lower()
+            url = s.get("url") or ""
+            leaders.append({
+                "symbol": s.get("symbol"),
+                "chain": s.get("chain"),
+                "narrative": b.get("narrative"),
+                "regime": b.get("regime"),
+                "heat": b.get("heat"),
+                "volume_24h": s.get("volume_24h"),
+                "market_cap": s.get("market_cap"),
+                "price_change_24h": s.get("price_change_24h"),
+                "url": url,
+                "traders_url": url,
+            })
+    leaders = sorted(leaders, key=lambda x: float(x.get("volume_24h") or 0), reverse=True)[:12]
+    return {
+        "clusters": clusters,
+        "leaders": leaders,
+        "wallets": list(load_wallets().values()),
+    }
+
+
 @app.get("/ui")
 def ui():
     path = os.path.join(BASE_DIR, "dashboard.html")
@@ -1638,4 +1741,4 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True
