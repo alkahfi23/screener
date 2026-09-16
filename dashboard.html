@@ -256,9 +256,9 @@ function renderCaDash(item) {
   const chg = Number(item.price_change_24h || 0);
   const vl = Number(rpt.vol_liq || (liq ? vol / liq : 0));
   const maxBar = Math.max(liq, mcap, vol, 1);
-  const health = vl <= 0 ? 10 : vl <= 4 ? clamp(100 - Math.abs(vl - 1.5) * 18, 35, 95) : clamp(40 - (vl - 4) * 6, 5, 40);
-  const trendPct = tw === "POSSIBLE" ? 78 : tw === "WATCH" ? 48 : tw === "UNLIKELY" ? 22 : 8;
-  const riskPct = item.honeypot || item.risk === "HONEYPOT" ? 8 : item.risk === "HIGH" ? 28 : item.risk === "LOW" ? 86 : 45;
+  const health = rpt.health_score != null ? Number(rpt.health_score) : 40;
+  const trendPct = rpt.trend_score != null ? Number(rpt.trend_score) : (tw === "POSSIBLE" ? 72 : tw === "WATCH" ? 38 : 16);
+  const riskPct = rpt.safety_score != null ? Number(rpt.safety_score) : 40;
   const healthColor = health >= 60 ? "#22c55e" : health >= 40 ? "#f59e0b" : "#ef4444";
   const chgColor = chg >= 0 ? "#4ade80" : "#f87171";
   const tr = document.createElement("tr");
