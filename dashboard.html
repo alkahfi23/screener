@@ -448,18 +448,56 @@ async function refreshData() {
         status.innerText = "Belum ada klaster narasi";
         return;
       }
+      const maxVol = Math.max(...raw.map(n => Number(n.volume_24h || 0)), 1);
+      const hot = raw.filter(n => n.regime === "HEATING" || n.regime === "BLOW-OFF");
+      const build = raw.filter(n => n.regime === "BUILDING");
+      const head = document.createElement("tr");
+      const htd = document.createElement("td");
+      htd.colSpan = 18;
+      htd.innerHTML = `<div class="whale-card ca-dash">
+        <h3>Papan narasi · tape hari ini</h3>
+        <div class="ca-kpis">
+          <div class="ca-kpi"><span>Cluster</span><b>${raw.length}</b></div>
+          <div class="ca-kpi"><span>Heating / blow-off</span><b style="color:#fbbf24">${hot.length}</b></div>
+          <div class="ca-kpi"><span>Building</span><b style="color:#4ade80">${build.length}</b></div>
+          <div class="ca-kpi"><span>Vol teratas</span><b>${raw[0] ? raw[0].narrative : "-"}</b></div>
+        </div>
+        <p class="note-box">HEATING = vol naik + 24h masih plus. BLOW-OFF = vol/liq gila, sering sudah telat. BUILDING = tape waras, pantau. Bukan prediksi ledakan.</p>
+      </div>`;
+      head.appendChild(htd);
+      table.appendChild(head);
       raw.forEach(n => {
+        const vl = Number(n.vol_liq || 0);
+        const heat = Number(n.heat || 0);
+        const regime = n.regime || "QUIET";
+        const rc = regime === "BUILDING" ? "safe" : regime === "HEATING" ? "warn" : regime === "BLOW-OFF" ? "danger" : "unknown";
+        const chips = (n.symbols || []).slice(0, 6).map(s => {
+          const chg = Number(s.price_change_24h || 0);
+          const col = chg >= 0 ? "#4ade80" : "#f87171";
+          return `<span class="muted">${s.symbol} <b style="color:${col}">${chg.toFixed(0)}%</b></span>`;
+        }).join(" · ");
         const tr = document.createElement("tr");
-        const syms = (n.symbols || []).map(s => s.symbol).join(", ");
-        tr.innerHTML = `
-          <td colspan="2"><span class="badge safe">${n.narrative}</span></td>
-          <td colspan="3">${n.tokens} token · ${syms}</td>
-          <td colspan="3">Vol ${money(n.volume_24h)}</td>
-          <td colspan="3">Liq ${money(n.liquidity_usd)}</td>
-          <td colspan="4">MCap ${money(n.market_cap)}</td>`;
+        const td = document.createElement("td");
+        td.colSpan = 18;
+        td.innerHTML = `<div class="whale-card">
+          <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;">
+            <div>
+              <span class="badge ${rc}">${regime}</span>
+              <strong style="margin-left:8px;">${n.narrative}</strong>
+              <div class="muted">${n.tokens} token · heat ${heat} · vol/liq ${vl.toFixed(2)}x · avg 24h ${Number(n.avg_change_24h||0).toFixed(1)}%</div>
+            </div>
+            <div class="muted">Vol ${money(n.volume_24h)} · Liq ${money(n.liquidity_usd)} · MCap ${money(n.market_cap)}</div>
+          </div>
+          <div class="bar-row" style="margin-top:10px;"><div>Volume</div>
+            <div class="bar-track"><div class="bar-fill ${vl>6?"hot":""}" style="width:${Math.max(4, Math.round(Number(n.volume_24h||0)/maxVol*100))}%"></div></div>
+            <div>${heat}</div>
+          </div>
+          <div style="margin-top:8px;">${chips || "-"}</div>
+        </div>`;
+        tr.appendChild(td);
         table.appendChild(tr);
       });
-      status.innerText = "Narasi " + raw.length;
+      status.innerText = "Narasi " + raw.length + " cluster";
       return;
     }
     const data = raw;
