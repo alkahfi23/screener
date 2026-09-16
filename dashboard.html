@@ -77,6 +77,21 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
 .bar-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #22c55e, #38bdf8); }
 .bar-fill.hot { background: linear-gradient(90deg, #f59e0b, #ef4444); }
 .note-box { color: #94a3b8; font-size: 12px; line-height: 1.5; }
+.ca-dash { display: grid; gap: 16px; }
+.ca-head { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.ca-head img { width: 64px; height: 64px; border-radius: 16px; border: 1px solid #1e293b; object-fit: cover; background: #020617; }
+.ca-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.ca-kpi { background: #020617; border: 1px solid #1e293b; border-radius: 12px; padding: 12px; }
+.ca-kpi b { display: block; font-size: 16px; color: #f8fafc; }
+.ca-kpi span { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.ca-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 800px) { .ca-grid { grid-template-columns: 1fr; } }
+.gauges { display: flex; gap: 12px; flex-wrap: wrap; justify-content: space-around; }
+.gauge { text-align: center; width: 120px; }
+.gauge svg { width: 110px; height: 70px; }
+.gauge label { display: block; font-size: 11px; color: #94a3b8; margin-top: 4px; }
+.check-list { margin: 0; padding-left: 18px; color: #cbd5e1; font-size: 13px; line-height: 1.7; }
+.ca-actions a { color: #38bdf8; margin-right: 12px; font-weight: 600; text-decoration: none; }
 </style>
 </head>
 <body>
@@ -208,6 +223,87 @@ function classify(item) {
   return { key: "safe", label: "SAFE FILTER", row: "row-safe" };
 }
 
+function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+function gaugeSvg(pct, color) {
+  const p = clamp(Number(pct) || 0, 0, 100);
+  const r = 42, c = Math.PI * r;
+  const dash = (p / 100) * c;
+  return `<svg viewBox="0 0 110 70">
+    <path d="M13 62 A42 42 0 0 1 97 62" fill="none" stroke="#1e293b" stroke-width="10" stroke-linecap="round"/>
+    <path d="M13 62 A42 42 0 0 1 97 62" fill="none" stroke="${color}" stroke-width="10" stroke-linecap="round"
+      stroke-dasharray="${dash} ${c}" />
+    <text x="55" y="58" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="700">${Math.round(p)}</text>
+  </svg>`;
+}
+function renderCaDash(item) {
+  const rpt = item.ca_report || {};
+  const tw = String(rpt.trend_window || "WATCH");
+  const twClass = tw === "POSSIBLE" ? "safe" : tw === "AVOID" || tw === "UNLIKELY" ? "danger" : "warn";
+  const liq = Number(item.liquidity_usd || 0);
+  const mcap = Number(item.market_cap || 0);
+  const vol = Number(item.volume_24h || 0);
+  const chg = Number(item.price_change_24h || 0);
+  const vl = Number(rpt.vol_liq || (liq ? vol / liq : 0));
+  const maxBar = Math.max(liq, mcap, vol, 1);
+  const health = vl <= 0 ? 10 : vl <= 4 ? clamp(100 - Math.abs(vl - 1.5) * 18, 35, 95) : clamp(40 - (vl - 4) * 6, 5, 40);
+  const trendPct = tw === "POSSIBLE" ? 78 : tw === "WATCH" ? 48 : tw === "UNLIKELY" ? 22 : 8;
+  const riskPct = item.honeypot || item.risk === "HONEYPOT" ? 8 : item.risk === "HIGH" ? 28 : item.risk === "LOW" ? 86 : 45;
+  const healthColor = health >= 60 ? "#22c55e" : health >= 40 ? "#f59e0b" : "#ef4444";
+  const chgColor = chg >= 0 ? "#4ade80" : "#f87171";
+  const tr = document.createElement("tr");
+  const td = document.createElement("td");
+  td.colSpan = 18;
+  td.innerHTML = `<div class="whale-card ca-dash">
+    <div class="ca-head">
+      ${item.icon ? `<img src="${item.icon}" alt="">` : ""}
+      <div>
+        <h3 style="margin:0 0 6px;font-size:22px;">$${item.symbol || "-"} <span class="muted">${item.name || ""}</span></h3>
+        <div class="muted">${chainOf(item)} · ${item.dex || ""} · ${item.token_address || ""}</div>
+        <div style="margin-top:8px;">
+          <span class="badge ${rpt.verified_profile ? "safe" : "unknown"}">${rpt.verified_profile ? "PROFIL ADA" : "PROFIL LEMAH"}</span>
+          <span class="badge ${rpt.not_honeypot ? "safe" : "danger"}">${rpt.not_honeypot ? "BUKAN HONEYPOT" : "HONEYPOT"}</span>
+          <span class="badge ${twClass}">TREND ${tw}</span>
+          <span class="badge ${upsideClass(item.upside)}">${item.upside || "-"}</span>
+        </div>
+      </div>
+    </div>
+    <div class="ca-kpis">
+      <div class="ca-kpi"><span>Likuiditas</span><b>${money(liq)}</b></div>
+      <div class="ca-kpi"><span>Market cap</span><b>${money(mcap)}</b></div>
+      <div class="ca-kpi"><span>Volume 24h</span><b>${money(vol)}</b></div>
+      <div class="ca-kpi"><span>24h</span><b style="color:${chgColor}">${chg.toFixed(2)}%</b></div>
+      <div class="ca-kpi"><span>Umur</span><b>${item.age_hours != null ? Number(item.age_hours).toFixed(1) + " jam" : "-"}</b></div>
+      <div class="ca-kpi"><span>Vol / Liq</span><b>${vl.toFixed(2)}x</b></div>
+    </div>
+    <div class="ca-grid">
+      <div>
+        <h3>Indikator window</h3>
+        <div class="gauges">
+          <div class="gauge">${gaugeSvg(health, healthColor)}<label>Kesehatan tape</label></div>
+          <div class="gauge">${gaugeSvg(trendPct, tw === "POSSIBLE" ? "#22c55e" : "#f59e0b")}<label>Peluang beberapa jam</label></div>
+          <div class="gauge">${gaugeSvg(riskPct, riskPct >= 70 ? "#22c55e" : "#ef4444")}<label>Skor aman</label></div>
+        </div>
+        <p class="note-box">${rpt.trend_note || "Bukan prediksi harga."}</p>
+      </div>
+      <div>
+        <h3>Struktur liq / mcap / vol</h3>
+        <div class="bar-row"><div>Liq</div><div class="bar-track"><div class="bar-fill" style="width:${Math.round(liq/maxBar*100)}%"></div></div><div>${money(liq)}</div></div>
+        <div class="bar-row"><div>MCap</div><div class="bar-track"><div class="bar-fill" style="width:${Math.round(mcap/maxBar*100)}%"></div></div><div>${money(mcap)}</div></div>
+        <div class="bar-row"><div>Vol</div><div class="bar-track"><div class="bar-fill ${vl > 6 ? "hot" : ""}" style="width:${Math.round(vol/maxBar*100)}%"></div></div><div>${money(vol)}</div></div>
+        <div class="bar-row"><div>Top10</div><div class="bar-track"><div class="bar-fill ${Number(item.top10_pct||0) >= 50 ? "hot" : ""}" style="width:${clamp(Number(item.top10_pct||0),0,100)}%"></div></div><div>${item.top10_pct || 0}%</div></div>
+      </div>
+    </div>
+    <ul class="check-list">${(rpt.checks || []).map(c => `<li>${c}</li>`).join("")}</ul>
+    <div class="ca-actions">
+      <a href="${dexUrl(item)}" target="_blank" rel="noreferrer">Chart Dex</a>
+      ${item.traders_url ? `<a href="${item.traders_url}" target="_blank" rel="noreferrer">Top Traders</a>` : ""}
+      ${item.fomo_url ? `<a href="${item.fomo_url}" target="_blank" rel="noreferrer">Trade FOMO</a>` : ""}
+    </div>
+  </div>`;
+  tr.appendChild(td);
+  return tr;
+}
+
 async function refreshData() {
   const status = document.getElementById("status");
   const table = document.getElementById("tableBody");
@@ -232,34 +328,7 @@ async function refreshData() {
       return;
     }
     if (currentView === "ca" && Array.isArray(raw)) {
-      raw.forEach(item => {
-        const rpt = item.ca_report || {};
-        const tw = String(rpt.trend_window || "WATCH");
-        const twClass = tw === "POSSIBLE" ? "safe" : tw === "AVOID" || tw === "UNLIKELY" ? "danger" : "warn";
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = 18;
-        td.innerHTML = `<div class="whale-card">
-          <h3>${item.symbol || "-"} · ${chainOf(item)} · ${item.token_address || ""}</h3>
-          <p>
-            <span class="badge ${rpt.verified_profile ? "safe" : "unknown"}">${rpt.verified_profile ? "PROFIL ADA" : "PROFIL LEMAH"}</span>
-            <span class="badge ${rpt.not_honeypot ? "safe" : "danger"}">${rpt.not_honeypot ? "BUKAN HONEYPOT" : "HONEYPOT"}</span>
-            <span class="badge ${twClass}">TREND ${tw}</span>
-            <span class="badge ${upsideClass(item.upside)}">${item.upside || "-"}</span>
-          </p>
-          <p class="note-box">${rpt.trend_note || ""} · vol/liq ${rpt.vol_liq || "-"}x · 24h ${item.price_change_24h || 0}% · umur ${item.age_hours || "-"} jam</p>
-          <p class="note-box">${(rpt.checks || []).join(" · ")}</p>
-          <p class="muted">
-            Liq ${money(item.liquidity_usd)} · MCap ${money(item.market_cap)} · Vol ${money(item.volume_24h)}
-            · top1 ${item.top1_pct || 0}% · top10 ${item.top10_pct || 0}%
-            · <a href="${dexUrl(item)}" target="_blank" rel="noreferrer">Chart</a>
-            ${item.traders_url ? ' · <a href="'+item.traders_url+'" target="_blank" rel="noreferrer">Top Traders</a>' : ""}
-            ${item.fomo_url ? ' · <a href="'+item.fomo_url+'" target="_blank" rel="noreferrer">FOMO</a>' : ""}
-          </p>
-        </div>`;
-        tr.appendChild(td);
-        table.appendChild(tr);
-      });
+      raw.forEach(item => table.appendChild(renderCaDash(item)));
       status.innerText = "Analisa CA " + raw.length;
       return;
     }
