@@ -222,7 +222,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
         <th>Confidence</th>
         <th>Verdict</th>
         <th>Whale</th>
-        <th>Pressure</th>
+        <th>Signal</th>
         <th>Flow</th>
         <th>Risk</th>
         <th>Holders</th>
@@ -745,7 +745,7 @@ async function refreshData() {
         <td class="confidence">${item.confidence}</td>
         <td>${item.verdict || "-"}</td>
         <td>${item.whale || "-"}</td>
-        <td>${item.pressure || "-"}</td>
+        <td>${(() => { const st = flowStrength(item); return `<span class="badge ${st.tone === "buy" ? "safe" : st.tone === "sell" ? "danger" : "unknown"}">${st.label}</span><div class="muted">${item.pressure || ""} · 5m ${st.b5}/${st.s5} · skor ${st.score}</div>`; })()}</td>
         <td class="${flowClass(item.flow)}">${item.flow || "-"}</td>
         <td>
           ${item.honeypot ? '<span class="badge danger">HONEYPOT</span>' : '<span class="badge ' + (cls.key) + '">' + (item.risk || "-") + '</span>'}
