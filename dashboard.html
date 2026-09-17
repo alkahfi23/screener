@@ -137,6 +137,18 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
 .war-side { position:absolute; top:8px; font-size:11px; letter-spacing:.06em; color:#94a3b8; }
 .war-side.l { left: 10px; color:#4ade80; }
 .war-side.r { right: 10px; color:#f87171; }
+.strength {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin: 12px 0; padding: 14px 16px; border-radius: 14px; border: 1px solid #1e293b;
+}
+.strength.buy { background: linear-gradient(90deg, rgba(34,197,94,.18), rgba(2,6,23,.4)); }
+.strength.sell { background: linear-gradient(90deg, rgba(239,68,68,.18), rgba(2,6,23,.4)); }
+.strength.neutral { background: #0b1220; }
+.strength h4 { margin: 0; font-size: 18px; }
+.strength small { color: #94a3b8; }
+.str-bar { flex: 1; height: 10px; background: #1e293b; border-radius: 99px; overflow: hidden; display:flex; }
+.str-bar .b { background: #22c55e; height: 100%; }
+.str-bar .s { background: #ef4444; height: 100%; }
 </style>
 </head>
 <body>
@@ -281,6 +293,22 @@ function classify(item) {
   return { key: "safe", label: "SAFE FILTER", row: "row-safe" };
 }
 
+function flowStrength(item) {
+  const b5 = Number(item.tx_buys_m5 || 0), s5 = Number(item.tx_sells_m5 || 0);
+  const b1 = Number(item.tx_buys_h1 || 0), s1 = Number(item.tx_sells_h1 || 0);
+  const t5 = b5 + s5, t1 = b1 + s1;
+  const p5 = t5 ? b5 / t5 : 0.5;
+  const p1 = t1 ? b1 / t1 : 0.5;
+  const score = Math.round(((t5 ? p5 : p1) * 0.65 + p1 * 0.35) * 100);
+  const chg5 = Number(item.price_change_m5 || 0);
+  let label = "NEUTRAL", tone = "neutral", note = "beli dan jual berimbang";
+  if (score >= 68 && chg5 >= 0) { label = "BUY STRENGTH"; tone = "buy"; note = "tekanan beli menang"; }
+  else if (score >= 58) { label = "BUY BIAS"; tone = "buy"; note = "beli sedikit unggul"; }
+  else if (score <= 32 && chg5 <= 0) { label = "SELL STRENGTH"; tone = "sell"; note = "tekanan jual menang"; }
+  else if (score <= 42) { label = "SELL BIAS"; tone = "sell"; note = "jual sedikit unggul"; }
+  if (t5 === 0 && t1 === 0) { label = "NO TAPE"; tone = "neutral"; note = "belum ada tx"; }
+  return { score, label, tone, note, p5: Math.round(p5*100), p1: Math.round(p1*100), b5, s5, b1, s1 };
+}
 function tapeHtml(item) {
   const buys = Number(item.tx_buys_m5 || 0);
   const sells = Number(item.tx_sells_m5 || 0);
@@ -305,7 +333,13 @@ function tapeHtml(item) {
   const px = item.price_usd ? Number(item.price_usd).toPrecision(6) : "-";
   const chg = Number(item.price_change_m5 || 0);
   const chgCol = chg >= 0 ? "#4ade80" : "#f87171";
-  return `<div class="war">
+  const st = flowStrength(item);
+  return `<div class="strength ${st.tone}">
+      <div><h4>${st.label}</h4><small>${st.note} · 5m buy ${st.p5}% · 1h buy ${st.p1}%</small></div>
+      <div class="str-bar" style="max-width:280px"><div class="b" style="width:${st.score}%"></div><div class="s" style="width:${100-st.score}%"></div></div>
+      <b>${st.score}</b>
+    </div>
+    <div class="war">
       <div class="war-side l">BELI · RITEL / SMART / WHALE</div>
       <div class="war-side r">JUAL</div>
       ${spawn("buy", nBuy)}${spawn("sell", nSell)}
@@ -359,6 +393,7 @@ function renderCaDash(item) {
           <span class="badge ${rpt.not_honeypot ? "safe" : "danger"}">${rpt.not_honeypot ? "BUKAN HONEYPOT" : "HONEYPOT"}</span>
           <span class="badge ${twClass}">TREND ${tw}</span>
           <span class="badge ${upsideClass(item.upside)}">${item.upside || "-"}</span>
+          <span class="badge ${flowStrength(item).tone === "buy" ? "safe" : flowStrength(item).tone === "sell" ? "danger" : "unknown"}">${flowStrength(item).label}</span>
         </div>
       </div>
     </div>
@@ -379,7 +414,6 @@ function renderCaDash(item) {
           <div class="gauge">${gaugeSvg(riskPct, riskPct >= 70 ? "#22c55e" : "#ef4444")}<label>Skor aman</label></div>
         </div>
         <p class="note-box">${rpt.trend_note || "Bukan prediksi harga."}</p>
-        ${tapeHtml(item)}
         ${tapeHtml(item)}
       </div>
       <div>
@@ -750,4 +784,4 @@ setInterval(() => { if (currentView === "cart") refreshData(); }, 60000);
 setInterval(() => { if (currentView === "ca" && (document.getElementById("caInput").value || "").trim().length >= 32) refreshData(); }, 8000);
 </script>
 </body>
-</html>
+</html
