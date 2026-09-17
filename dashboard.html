@@ -92,6 +92,18 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
 .gauge label { display: block; font-size: 11px; color: #94a3b8; margin-top: 4px; }
 .check-list { margin: 0; padding-left: 18px; color: #cbd5e1; font-size: 13px; line-height: 1.7; }
 .ca-actions a { color: #38bdf8; margin-right: 12px; font-weight: 600; text-decoration: none; }
+.tape {
+  position: relative; height: 64px; margin-top: 10px;
+  background: #020617; border: 1px solid #1e293b; border-radius: 12px; overflow: hidden;
+}
+.tape-dot {
+  position: absolute; top: 50%; width: 8px; height: 8px; margin-top: -4px;
+  border-radius: 50%; animation: tape-run 2.8s linear infinite;
+}
+.tape-dot.buy { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+.tape-dot.sell { background: #ef4444; box-shadow: 0 0 10px #ef4444; }
+@keyframes tape-run { from { left: -12px; } to { left: 102%; } }
+.tape-label { display:flex; justify-content:space-between; font-size:12px; color:#94a3b8; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -119,6 +131,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
     <select id="walletChain">
       <option value="solana">solana</option>
       <option value="robinhood">robinhood</option>
+      <option value="arc">arc</option>
       <option value="base">base</option>
       <option value="ethereum">ethereum</option>
     </select>
@@ -128,6 +141,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
       <option value="">auto chain</option>
       <option value="solana">solana</option>
       <option value="robinhood">robinhood</option>
+      <option value="arc">arc</option>
       <option value="base">base</option>
       <option value="ethereum">ethereum</option>
       <option value="bsc">bsc</option>
@@ -234,6 +248,20 @@ function classify(item) {
   return { key: "safe", label: "SAFE FILTER", row: "row-safe" };
 }
 
+function tapeHtml(item) {
+  const buys = Number(item.tx_buys_m5 || 0);
+  const sells = Number(item.tx_sells_m5 || 0);
+  const b1 = Number(item.tx_buys_h1 || 0);
+  const s1 = Number(item.tx_sells_h1 || 0);
+  const total = Math.max(buys + sells, 1);
+  const nBuy = Math.min(8, Math.max(buys ? 1 : 0, Math.round(buys / total * 8)));
+  const nSell = Math.min(8, Math.max(sells ? 1 : 0, Math.round(sells / total * 8)));
+  let dots = "";
+  for (let i = 0; i < nBuy; i++) dots += `<span class="tape-dot buy" style="animation-delay:${(i*0.28).toFixed(2)}s;top:${20+((i*13)%40)}%"></span>`;
+  for (let i = 0; i < nSell; i++) dots += `<span class="tape-dot sell" style="animation-delay:${(0.15+i*0.31).toFixed(2)}s;top:${25+((i*11)%38)}%"></span>`;
+  return `<div class="tape">${dots || '<span class="muted" style="padding:20px">Tidak ada tx 5m</span>'}</div>
+    <div class="tape-label"><span>Beli 5m ${buys} · 1h ${b1}</span><span>Jual 5m ${sells} · 1h ${s1}</span></div>`;
+}
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 function gaugeSvg(pct, color) {
   const p = clamp(Number(pct) || 0, 0, 100);
@@ -295,6 +323,8 @@ function renderCaDash(item) {
           <div class="gauge">${gaugeSvg(riskPct, riskPct >= 70 ? "#22c55e" : "#ef4444")}<label>Skor aman</label></div>
         </div>
         <p class="note-box">${rpt.trend_note || "Bukan prediksi harga."}</p>
+        ${tapeHtml(item)}
+        ${tapeHtml(item)}
       </div>
       <div>
         <h3>Struktur liq / mcap / vol</h3>
@@ -661,6 +691,7 @@ refreshData();
 pollWorker();
 setInterval(pollWorker, 5000);
 setInterval(() => { if (currentView === "cart") refreshData(); }, 60000);
+setInterval(() => { if (currentView === "ca" && (document.getElementById("caInput").value || "").trim().length >= 32) refreshData(); }, 8000);
 </script>
 </body>
 </html>
