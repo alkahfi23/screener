@@ -565,6 +565,7 @@ def enrich(p: Dict, is_breakout: bool = False) -> Dict:
         "volume_h1": float(((p.get("volume") or {}).get("h1") or 0) or 0),
         "price_change_m5": round(num(p, "priceChange", "m5"), 2),
         "price_change_h1": round(num(p, "priceChange", "h1"), 2),
+        "price_change_h6": round(num(p, "priceChange", "h6"), 2),
         "price_change_24h": round(num(p, "priceChange", "h24"), 2),
         "age_hours": round(age, 2) if age is not None else None,
         "pair_address": p.get("pairAddress"),
@@ -795,6 +796,31 @@ def security_check(chain: str, address: str) -> Dict:
     return out
 
 
+def detect_mechanics(row: Dict) -> Dict:
+    flags = " ".join(str(f).lower() for f in (row.get("flags") or []))
+    blob = " ".join([
+        str(row.get("name") or ""),
+        str(row.get("symbol") or ""),
+        " ".join(str(w) for w in (row.get("websites") or [])),
+        " ".join(str((s or {}).get("url") or "") for s in (row.get("socials") or [])),
+        flags,
+    ]).lower()
+    lp = row.get("lp_locked")
+    lp_pct = float(row.get("lp_locked_pct") or 0)
+    if lp is True or lp_pct >= 90 or "lp burned" in flags or "liquidity burned" in flags:
+        lp_status = "LP BURN / LOCK"
+    elif lp is False:
+        lp_status = "LP UNLOCKED"
+    else:
+        lp_status = "LP UNKNOWN"
+    burn = "TOKEN BURN CLAIM" if any(k in blob for k in ("burn", "deflation", "dead wallet")) else "BURN UNKNOWN"
+    if "cannot burn" in flags or "no burn" in blob:
+        burn = "NO BURN"
+    buyback = "BUYBACK CLAIM" if any(k in blob for k in ("buyback", "buy back", "buy-back", "repurchase")) else "BUYBACK UNKNOWN"
+    note = "Burn/buyback dari LP lock + teks profil. Bukan indexer on-chain."
+    return {"lp_status": lp_status, "burn_status": burn, "buyback_status": buyback, "note": note}
+
+
 def attach_security(rows: List[Dict]) -> List[Dict]:
     for row in rows:
         sec = security_check(row.get("chain") or row.get("sector") or "", row.get("token_address") or "")
@@ -813,6 +839,11 @@ def attach_security(rows: List[Dict]) -> List[Dict]:
         row["holder_count"] = sec.get("holder_count") or 0
         row["lp_locked"] = sec.get("lp_locked")
         row["lp_locked_pct"] = sec.get("lp_locked_pct")
+        mech = detect_mechanics(row)
+        row["lp_status"] = mech["lp_status"]
+        row["burn_status"] = mech["burn_status"]
+        row["buyback_status"] = mech["buyback_status"]
+        row["mechanics_note"] = mech["note"]
         row["rugged"] = bool(sec.get("rugged"))
         if sec.get("honeypot"):
             row["confidence"] = min(int(row.get("confidence") or 0), 25)
