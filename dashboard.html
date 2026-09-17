@@ -324,6 +324,28 @@ function classify(item) {
   return { key: "safe", label: "SAFE FILTER", row: "row-safe" };
 }
 
+function keputusan(item, rpt) {
+  const st = flowStrength(item);
+  const safe = Number((rpt || {}).safety_score || 0);
+  const trend = String((rpt || {}).trend_window || "");
+  const risk = String(item.risk || "");
+  if (item.honeypot || risk === "HONEYPOT" || trend === "AVOID") {
+    return { label: "JANGAN", tone: "danger", note: "honeypot / avoid" };
+  }
+  if (risk === "HIGH" || safe < 45 || trend === "UNLIKELY") {
+    return { label: "JANGAN", tone: "danger", note: "aman lemah atau window sudah lewat — tape hijau diabaikan" };
+  }
+  if (safe >= 70 && trend === "POSSIBLE" && st.tone === "buy" && String(item.upside || "") === "HIGH ROOM") {
+    return { label: "BOLEH PERTIMBANG", tone: "buy", note: "aman + window + buyer. Spekulatif, size kecil." };
+  }
+  if (st.tone === "buy" && safe < 55) {
+    return { label: "JANGAN KEJAR", tone: "danger", note: "buyer aktif tapi skor aman rendah" };
+  }
+  if (safe >= 55 && st.tone !== "sell" && trend === "WATCH") {
+    return { label: "PANTAS SAJA", tone: "neutral", note: "aman cukup, belum setup masuk" };
+  }
+  return { label: "PANTAS", tone: "neutral", note: "belum cukup untuk keputusan masuk" };
+}
 function flowStrength(item) {
   const b5 = Number(item.tx_buys_m5 || 0), s5 = Number(item.tx_sells_m5 || 0);
   const b1 = Number(item.tx_buys_h1 || 0), s1 = Number(item.tx_sells_h1 || 0);
@@ -365,7 +387,11 @@ function tapeHtml(item) {
   const chg = Number(item.price_change_m5 || 0);
   const chgCol = chg >= 0 ? "#4ade80" : "#f87171";
   const st = flowStrength(item);
-  return `<div class="strength ${st.tone}">
+  const dec = keputusan(item, item.ca_report || {});
+  return `<div class="strength ${dec.tone}">
+      <div><h4>KEPUTUSAN · ${dec.label}</h4><small>${dec.note}</small></div>
+    </div>
+    <div class="strength ${st.tone}">
       <div><h4>${st.label}</h4><small>${st.note} · 5m buy ${st.p5}% · 1h buy ${st.p1}%</small></div>
       <div class="str-bar" style="max-width:280px"><div class="b" style="width:${st.score}%"></div><div class="s" style="width:${100-st.score}%"></div></div>
       <b>${st.score}</b>
