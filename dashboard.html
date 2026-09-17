@@ -171,6 +171,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
       Sembunyikan honeypot / red flag
     </label>
     <button id="btnDiscovery" class="active" onclick="setView('discovery')">Discovery</button>
+    <button id="btnQuality" onclick="setView('quality')">Setup Hijau</button>
     <button id="btnBreakout" onclick="setView('breakout')">Breakout</button>
     <button id="btnWatch" onclick="setView('watch')">Watch</button>
     <button id="btnNarr" onclick="setView('narratives')">Narasi</button>
@@ -253,6 +254,7 @@ function dexUrl(item) {
 function setView(view) {
   currentView = view;
   document.getElementById("btnDiscovery").classList.toggle("active", view === "discovery");
+  document.getElementById("btnQuality").classList.toggle("active", view === "quality");
   document.getElementById("btnBreakout").classList.toggle("active", view === "breakout");
   document.getElementById("btnWatch").classList.toggle("active", view === "watch");
   document.getElementById("btnNarr").classList.toggle("active", view === "narratives");
@@ -261,6 +263,7 @@ function setView(view) {
   document.getElementById("btnCa").classList.toggle("active", view === "ca");
   document.getElementById("sectionTitle").innerText =
     view === "discovery" ? "Discovery – Early Gems" :
+    view === "quality" ? "Setup Hijau – tape ≥75 · peluang POSSIBLE · aman ≥70" :
     view === "watch" ? "Watch – token tersimpan" :
     view === "narratives" ? "Narasi – klaster volume" :
     view === "whales" ? "Whale Flow – pergeseran tape" :
@@ -511,6 +514,8 @@ async function refreshData() {
   status.innerText = "Fetching data...";
   const url = currentView === "discovery"
     ? "/scan/top?limit=20&mode=" + document.getElementById("mode").value
+    : currentView === "quality"
+    ? "/scan/quality?limit=20"
     : currentView === "watch"
     ? "/scan/watch?limit=20"
     : currentView === "narratives"
@@ -734,7 +739,9 @@ async function refreshData() {
     }
     const data = raw;
     if (!Array.isArray(data) || data.length === 0) {
-      status.innerText = "No data found. Coba mode Aggressive.";
+      status.innerText = currentView === "quality"
+        ? "Tidak ada token lolos 3 gerbang hijau. Normal."
+        : "No data found. Coba mode Aggressive.";
       return;
     }
     const rank = (item) => {
@@ -765,6 +772,7 @@ async function refreshData() {
           <div class="muted">${item.name || item.token_address || ""}</div>
           <div class="muted">${item.narrative || ""}</div>
           ${sparkline(item)}
+          ${currentView === "quality" ? `<div class="muted">tape ${item.health_score || "-"} · ${item.trend_window || ""} · aman ${item.safety_score || "-"}</div>` : ""}
         </td>
         <td>${chainOf(item)}</td>
         <td>${item.score}</td>
