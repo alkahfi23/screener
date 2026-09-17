@@ -1031,6 +1031,44 @@ def scan_top(
         return []
 
 
+@app.get("/scan/quality")
+def scan_quality(limit: int = 20):
+    """Token dengan tape sehat, window POSSIBLE, keamanan hijau."""
+    try:
+        best_pairs = group_best_by_token(fetch_pairs())
+        rows = []
+        for p in best_pairs.values():
+            liq = num(p, "liquidity", "usd")
+            vol = num(p, "volume", "h24")
+            if liq < 8_000 or vol < 5_000:
+                continue
+            rows.append(enrich(p, False))
+        rows = attach_security(rows)
+        picked = []
+        for row in rows:
+            if row.get("honeypot") or row.get("risk") in ("HONEYPOT", "HIGH"):
+                continue
+            rpt = ca_analysis(row)
+            row["ca_report"] = rpt
+            row["health_score"] = rpt.get("health_score")
+            row["safety_score"] = rpt.get("safety_score")
+            row["trend_score"] = rpt.get("trend_score")
+            row["trend_window"] = rpt.get("trend_window")
+            row["green_alert"] = is_green_signal(row)
+            row["fomo_url"] = fomo_url(row)
+            if (
+                float(rpt.get("health_score") or 0) >= 75
+                and str(rpt.get("trend_window") or "") == "POSSIBLE"
+                and float(rpt.get("safety_score") or 0) >= 70
+            ):
+                picked.append(row)
+        picked.sort(key=lambda x: (x.get("safety_score") or 0, x.get("confidence") or 0), reverse=True)
+        return picked[:limit]
+    except Exception as e:
+        print("QUALITY ERROR:", e)
+        return []
+
+
 @app.get("/scan/breakout")
 def scan_breakout(limit: int = 10):
     try:
@@ -1156,8 +1194,12 @@ def ca_analysis(row: Dict) -> Dict:
         safety = 25
     if rh_empty:
         safety = min(safety, 42)
-    if flags:
-        safety = min(safety, 50)
+    hard_flag = any(
+        any(k in f for k in ("HONEYPOT", "RUGGED", "MINT", "FREEZE", "HIDDEN", "CANNOT", "BLACKLIST"))
+        for f in flags
+    )
+    if hard_flag:
+        safety = min(safety, 48)
     if chg <= -40:
         safety = min(safety, 40)
 
@@ -1914,4 +1956,4 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
