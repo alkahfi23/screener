@@ -796,6 +796,53 @@ def security_check(chain: str, address: str) -> Dict:
     return out
 
 
+ETHERSCAN_KEY = os.getenv("ETHERSCAN_API_KEY", "").strip()
+SCAN_CHAIN = {
+    "ethereum": 1,
+    "base": 8453,
+    "bsc": 56,
+    "arbitrum": 42161,
+    "avalanche": 43114,
+}
+DEAD_WALLETS = {
+    "0x0000000000000000000000000000000000000000",
+    "0x000000000000000000000000000000000000dead",
+}
+
+
+def check_evm_burn(chain: str, token: str) -> Dict:
+    if not ETHERSCAN_KEY:
+        return {"ok": False, "reason": "ETHERSCAN_API_KEY kosong"}
+    cid = SCAN_CHAIN.get((chain or "").lower())
+    if not cid:
+        return {"ok": False, "reason": "chain bukan EVM Etherscan"}
+    token = (token or "").lower()
+    burned = 0.0
+    try:
+        for sink in DEAD_WALLETS:
+            url = (
+                "https://api.etherscan.io/v2/api"
+                f"?chainid={cid}&module=account&action=tokentx"
+                f"&contractaddress={token}&address={sink}"
+                f"&page=1&offset=100&sort=desc&apikey={ETHERSCAN_KEY}"
+            )
+            data = _get_json(url, timeout=12) or {}
+            rows = data.get("result") or []
+            if not isinstance(rows, list):
+                continue
+            for tx in rows:
+                to = str(tx.get("to") or "").lower()
+                if to != sink:
+                    continue
+                raw = float(tx.get("value") or 0)
+                dec = int(tx.get("tokenDecimal") or 18)
+                burned += raw / (10 ** dec)
+            time.sleep(0.2)
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+    return {"ok": True, "burned_tokens": burned}
+
+
 def detect_mechanics(row: Dict) -> Dict:
     flags = " ".join(str(f).lower() for f in (row.get("flags") or []))
     blob = " ".join([
@@ -816,8 +863,14 @@ def detect_mechanics(row: Dict) -> Dict:
     burn = "TOKEN BURN CLAIM" if any(k in blob for k in ("burn", "deflation", "dead wallet")) else "BURN UNKNOWN"
     if "cannot burn" in flags or "no burn" in blob:
         burn = "NO BURN"
+    onchain = row.get("burn_onchain")
+    if isinstance(onchain, dict) and onchain.get("ok"):
+        amt = float(onchain.get("burned_tokens") or 0)
+        burn = f"BURNED {amt:.2f}" if amt > 0 else "NO BURN ONCHAIN"
+    elif isinstance(onchain, dict) and onchain.get("reason"):
+        burn = "BURN UNKNOWN"
     buyback = "BUYBACK CLAIM" if any(k in blob for k in ("buyback", "buy back", "buy-back", "repurchase")) else "BUYBACK UNKNOWN"
-    note = "Burn/buyback dari LP lock + teks profil. Bukan indexer on-chain."
+    note = "LP dari RugCheck. Burn EVM via Etherscan kalau ETHERSCAN_API_KEY ada. Buyback tetap klaim teks."
     return {"lp_status": lp_status, "burn_status": burn, "buyback_status": buyback, "note": note}
 
 
@@ -1170,6 +1223,12 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
                 row["traders_url"] = f"https://dexscreener.com/{chain_l}/{pair}"
             row["fomo_url"] = fomo_url(row)
             row["green_alert"] = is_green_signal(row)
+            row["burn_onchain"] = check_evm_burn(row.get("chain") or "", row.get("token_address") or "")
+            mech = detect_mechanics(row)
+            row["lp_status"] = mech["lp_status"]
+            row["burn_status"] = mech["burn_status"]
+            row["buyback_status"] = mech["buyback_status"]
+            row["mechanics_note"] = mech["note"]
             row["ca_report"] = ca_analysis(row)
         return rows
     except Exception as e:
@@ -1855,4 +1914,4 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True
