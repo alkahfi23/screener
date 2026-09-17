@@ -149,6 +149,11 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
 .str-bar { flex: 1; height: 10px; background: #1e293b; border-radius: 99px; overflow: hidden; display:flex; }
 .str-bar .b { background: #22c55e; height: 100%; }
 .str-bar .s { background: #ef4444; height: 100%; }
+.chart-frame {
+  width: 100%; height: 360px; border: 1px solid #1e293b; border-radius: 14px;
+  background: #020617; margin-top: 12px;
+}
+.spark { display:inline-block; vertical-align:middle; }
 </style>
 </head>
 <body>
@@ -271,6 +276,32 @@ function flowClass(flow) {
   return "flow-neutral";
 }
 function money(n) { return "$" + Number(n || 0).toLocaleString(); }
+function mechClass(s) {
+  const t = String(s || "").toUpperCase();
+  if (t.includes("LOCK") || t.includes("BURN CLAIM") || t.includes("BUYBACK CLAIM")) return "safe";
+  if (t.includes("UNLOCK") || t.includes("NO BURN")) return "danger";
+  return "unknown";
+}
+function sparkline(item) {
+  const pts = [
+    Number(item.price_change_m5 || 0),
+    Number(item.price_change_h1 || 0),
+    Number(item.price_change_h6 || 0),
+    Number(item.price_change_24h || 0),
+  ];
+  const min = Math.min(-5, ...pts), max = Math.max(5, ...pts);
+  const w = 88, h = 28;
+  const ys = pts.map((v, i) => {
+    const x = 4 + i * ((w - 8) / 3);
+    const y = h - 4 - ((v - min) / (max - min || 1)) * (h - 8);
+    return x + "," + y;
+  });
+  const last = pts[pts.length - 1];
+  const col = last >= 0 ? "#22c55e" : "#ef4444";
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
+    <polyline fill="none" stroke="${col}" stroke-width="2" points="${ys.join(" ")}"/>
+  </svg>`;
+}
 function upsideClass(label) {
   const u = String(label || "").toUpperCase();
   if (u === "HIGH ROOM") return "safe";
@@ -404,6 +435,16 @@ function renderCaDash(item) {
       <div class="ca-kpi"><span>24h</span><b style="color:${chgColor}">${chg.toFixed(2)}%</b></div>
       <div class="ca-kpi"><span>Umur</span><b>${item.age_hours != null ? Number(item.age_hours).toFixed(1) + " jam" : "-"}</b></div>
       <div class="ca-kpi"><span>Vol / Liq</span><b>${vl.toFixed(2)}x</b></div>
+      <div class="ca-kpi"><span>LP</span><b class="badge ${mechClass(item.lp_status)}">${item.lp_status || "LP UNKNOWN"}</b></div>
+      <div class="ca-kpi"><span>Burn</span><b class="badge ${mechClass(item.burn_status)}">${item.burn_status || "BURN UNKNOWN"}</b></div>
+      <div class="ca-kpi"><span>Buyback</span><b class="badge ${mechClass(item.buyback_status)}">${item.buyback_status || "BUYBACK UNKNOWN"}</b></div>
+    </div>
+    <div>
+      <h3>Chart · 5m / 1h / 6h / 24h ${sparkline(item)}</h3>
+      ${item.pair_address && chainOf(item)
+        ? `<iframe class="chart-frame" src="https://dexscreener.com/${chainOf(item).toLowerCase()}/${item.pair_address}?embed=1&theme=dark&trades=0&info=0" title="chart"></iframe>`
+        : `<p class="note-box">Pair belum ada, chart Dex tidak bisa di-embed.</p>`}
+      <p class="note-box">${item.mechanics_note || "Burn/buyback = LP lock + klaim di nama/web. Bukan indexer burn on-chain."}</p>
     </div>
     <div class="ca-grid">
       <div>
@@ -697,6 +738,7 @@ async function refreshData() {
           ${item.traders_url || dexUrl(item) !== "#" ? '<div class="muted"><a href="' + (item.traders_url || dexUrl(item)) + '" target="_blank" rel="noreferrer">Top Traders</a>' + (item.fomo_url ? ' · <a href="'+item.fomo_url+'" target="_blank" rel="noreferrer">FOMO</a>' : '') + (item.green_alert ? ' · ALERT OK' : '') + '</div>' : ''}
           <div class="muted">${item.name || item.token_address || ""}</div>
           <div class="muted">${item.narrative || ""}</div>
+          ${sparkline(item)}
         </td>
         <td>${chainOf(item)}</td>
         <td>${item.score}</td>
@@ -784,4 +826,4 @@ setInterval(() => { if (currentView === "cart") refreshData(); }, 60000);
 setInterval(() => { if (currentView === "ca" && (document.getElementById("caInput").value || "").trim().length >= 32) refreshData(); }, 8000);
 </script>
 </body>
-</html
+</html>
