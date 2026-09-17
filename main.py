@@ -19,7 +19,7 @@ app.add_middleware(
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CHAINS = {"ethereum", "base", "solana", "bsc", "arbitrum", "avalanche", "robinhood"}
+CHAINS = {"ethereum", "base", "solana", "bsc", "arbitrum", "avalanche", "robinhood", "arc"}
 
 JUNK_SYMBOLS = {
     "ETH", "WETH", "BTC", "WBTC", "SOL", "WSOL", "BNB", "WBNB", "BSC",
@@ -126,6 +126,9 @@ def wallet_links(addr: str, chain: str) -> Dict[str, str]:
     elif c == "robinhood":
         links["explorer"] = f"https://explorer.robinhood.com/address/{a}"
         links["gmgn"] = f"https://gmgn.ai/base/address/{a}"
+    elif c == "arc":
+        links["explorer"] = f"https://explorer.arc.io/address/{a}"
+        links["gmgn"] = ""
     else:
         links["gmgn"] = f"https://gmgn.ai/{c}/address/{a}"
         links["explorer"] = f"https://blockscan.com/address/{a}"
@@ -476,6 +479,7 @@ NARRATIVE_RULES = [
     ("LAUNCHPAD", ("pump.fun", "pumpfun", "launchpad", "fairlaunch")),
     ("POLITICS", ("trump", "maga", "potus", "election", "vote")),
     ("ROBINHOOD CHAIN", ("robinhood",)),
+    ("ARC CHAIN", ("circle arc",)),
 ]
 
 
@@ -500,6 +504,8 @@ def detect_narrative(row_or_pair: Dict) -> str:
     chain_l = str(chain).lower()
     if chain_l == "robinhood" and "ROBINHOOD CHAIN" not in hits:
         hits.append("ROBINHOOD CHAIN")
+    if chain_l == "arc" and "ARC CHAIN" not in hits:
+        hits.append("ARC CHAIN")
     if dex_l in ("pumpswap", "pumpfun", "raydium") and "LAUNCHPAD" not in hits and "MEME" in hits:
         hits.append("LAUNCHPAD")
     return " · ".join(hits[:2]) if hits else "UNLABELED"
@@ -551,6 +557,10 @@ def enrich(p: Dict, is_breakout: bool = False) -> Dict:
         "market_cap": mcap,
         "volume_24h": round(vol, 2),
         "price_usd": p.get("priceUsd"),
+        "tx_buys_m5": int(((p.get("txns") or {}).get("m5") or {}).get("buys") or 0),
+        "tx_sells_m5": int(((p.get("txns") or {}).get("m5") or {}).get("sells") or 0),
+        "tx_buys_h1": int(((p.get("txns") or {}).get("h1") or {}).get("buys") or 0),
+        "tx_sells_h1": int(((p.get("txns") or {}).get("h1") or {}).get("sells") or 0),
         "price_change_m5": round(num(p, "priceChange", "m5"), 2),
         "price_change_h1": round(num(p, "priceChange", "h1"), 2),
         "price_change_24h": round(num(p, "priceChange", "h24"), 2),
@@ -1586,6 +1596,7 @@ FOMO_CHAIN = {
     "arbitrum": "arbitrum",
     "avalanche": "avalanche",
     "robinhood": "robinhood",
+    "arc": "arc",
 }
 
 
