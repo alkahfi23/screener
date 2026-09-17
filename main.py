@@ -561,6 +561,8 @@ def enrich(p: Dict, is_breakout: bool = False) -> Dict:
         "tx_sells_m5": int(((p.get("txns") or {}).get("m5") or {}).get("sells") or 0),
         "tx_buys_h1": int(((p.get("txns") or {}).get("h1") or {}).get("buys") or 0),
         "tx_sells_h1": int(((p.get("txns") or {}).get("h1") or {}).get("sells") or 0),
+        "volume_m5": float(((p.get("volume") or {}).get("m5") or 0) or 0),
+        "volume_h1": float(((p.get("volume") or {}).get("h1") or 0) or 0),
         "price_change_m5": round(num(p, "priceChange", "m5"), 2),
         "price_change_h1": round(num(p, "priceChange", "h1"), 2),
         "price_change_24h": round(num(p, "priceChange", "h24"), 2),
