@@ -1,12 +1,13 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import requests
 import time
 import os
 import json
 import threading
+import re
 
 app = FastAPI(title="Hybrid Early Gem Scanner – DexScreener PRO")
 
@@ -1710,12 +1711,13 @@ def tg_buttons(row: Dict) -> dict:
     return {"inline_keyboard": buttons} if buttons else {}
 
 
-def send_telegram(text: str, parse_mode: str = "HTML", buttons: Optional[dict] = None) -> bool:
-    if not TG_TOKEN or not TG_CHAT:
+def send_telegram(text: str, parse_mode: str = "HTML", buttons: Optional[dict] = None, chat_id: Optional[str] = None) -> bool:
+    dest = str(chat_id or TG_CHAT or "").strip()
+    if not TG_TOKEN or not dest:
         print("telegram skip: token/chat_id kosong")
         return False
     payload = {
-        "chat_id": TG_CHAT,
+        "chat_id": dest,
         "text": text,
         "parse_mode": parse_mode,
         "disable_web_page_preview": True,
@@ -1735,11 +1737,12 @@ def send_telegram(text: str, parse_mode: str = "HTML", buttons: Optional[dict] =
         return False
 
 
-def send_telegram_photo(photo_url: str, caption: str, buttons: Optional[dict] = None) -> bool:
-    if not TG_TOKEN or not TG_CHAT:
+def send_telegram_photo(photo_url: str, caption: str, buttons: Optional[dict] = None, chat_id: Optional[str] = None) -> bool:
+    dest = str(chat_id or TG_CHAT or "").strip()
+    if not TG_TOKEN or not dest:
         return False
     payload = {
-        "chat_id": TG_CHAT,
+        "chat_id": dest,
         "photo": photo_url,
         "caption": caption[:1024],
         "parse_mode": "HTML",
@@ -1757,6 +1760,157 @@ def send_telegram_photo(photo_url: str, caption: str, buttons: Optional[dict] = 
     except Exception as e:
         print("telegram photo error:", e)
         return False
+
+
+CA_EVM_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
+CA_SOL_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
+TG_OFFSET_FILE = os.path.join(DATA_DIR, "tg_offset.json")
+TG_OFFSET = {"id": 0}
+
+
+def extract_ca(text: str) -> str:
+    raw = (text or "").strip()
+    m = CA_EVM_RE.search(raw)
+    if m:
+        return m.group(0)
+    for m in CA_SOL_RE.finditer(raw):
+        tok = m.group(0)
+        if tok.lower() in ("http", "https"):
+            continue
+        if any(x in raw.lower() for x in ("dexscreener", "t.me", "http")) and tok.startswith("http"):
+            continue
+        if len(tok) >= 32:
+            return tok
+    return ""
+
+
+def analisa_id(row: Dict) -> str:
+    rpt = row.get("ca_report") or {}
+    tw = str(rpt.get("trend_window") or "WATCH")
+    health = rpt.get("health_score")
+    aman = rpt.get("safety_score")
+    early = is_early_setup(row, "balanced")
+    if row.get("honeypot") or tw == "AVOID":
+        putusan = "JANGAN MASUK"
+    elif not early or tw == "UNLIKELY" or row.get("risk") == "HIGH":
+        putusan = "LEWATI — bukan setup early"
+    elif tw == "POSSIBLE" and early:
+        putusan = "BOLEH DIPANTAU — spekulatif, size kecil"
+    else:
+        putusan = "PANTAS SAJA — jangan kejar"
+    chg = float(row.get("price_change_24h") or 0)
+    lines = [
+        f"<b>Analisa CA</b> ${row.get('symbol') or '-'}",
+        f"{row.get('name') or ''}",
+        f"{str(row.get('chain') or '').upper()} · {row.get('dex') or '-'}",
+        "━━━━━━━━━━━━",
+        f"<b>Putusan:</b> {putusan}",
+        f"Window: {tw}",
+        f"Risk: {row.get('risk') or '-'} · Honey: {'YA' if row.get('honeypot') else 'bukan'}",
+        f"Tape {health if health is not None else '-'} · Aman {aman if aman is not None else '-'}",
+        f"Upside {row.get('upside') or '-'}",
+        "━━━━━━━━━━━━",
+        f"Liq {_usd(row.get('liquidity_usd'))} · MCap {_usd(row.get('market_cap'))}",
+        f"Vol {_usd(row.get('volume_24h'))} · 24h {chg:+.1f}%",
+        f"Umur {row.get('age_hours') or '-'} jam · vol/liq {rpt.get('vol_liq') or '-'}",
+        f"Top10 {row.get('top10_pct') or 0}%",
+        f"LP {row.get('lp_status') or '-'} · Burn {row.get('burn_status') or '-'}",
+        "━━━━━━━━━━━━",
+        f"<code>{row.get('token_address') or '-'}</code>",
+    ]
+    if row.get("url"):
+        lines.append(f'<a href="{row["url"]}">Chart DexScreener</a>')
+    if row.get("fomo_url"):
+        lines.append(f'<a href="{row["fomo_url"]}">Trade FOMO</a>')
+    note = rpt.get("trend_note") or "Ini saringan, bukan ramalan harga."
+    lines.append(note)
+    return "\n".join(lines)
+
+
+def handle_ca_message(text: str, chat_id: str) -> Dict[str, Any]:
+    addr = extract_ca(text)
+    if not addr:
+        send_telegram(
+            "Kirim <b>CA / mint penuh</b>.\nContoh EVM 0x + 40 hex, atau mint Solana 32–44 karakter.",
+            chat_id=chat_id,
+        )
+        return {"ok": False, "reason": "no_ca"}
+    send_telegram(f"Cek CA <code>{addr}</code> ...", chat_id=chat_id)
+    rows = scan_ca(address=addr, chain="")
+    if isinstance(rows, dict) and rows.get("error"):
+        send_telegram(f"Gagal: {rows.get('error')}\n<code>{addr}</code>", chat_id=chat_id)
+        return rows
+    if not rows:
+        send_telegram("Pair tidak ketemu di DexScreener.", chat_id=chat_id)
+        return {"ok": False}
+    row = rows[0]
+    caption = analisa_id(row)
+    icon = row.get("icon") or ""
+    if icon:
+        send_telegram_photo(icon, caption[:1024], chat_id=chat_id)
+        if len(caption) > 900:
+            send_telegram(caption, chat_id=chat_id)
+    else:
+        send_telegram(caption, chat_id=chat_id)
+    return {"ok": True, "symbol": row.get("symbol"), "address": addr}
+
+
+def process_tg_update(upd: Dict) -> None:
+    msg = upd.get("message") or upd.get("edited_message") or {}
+    text = msg.get("text") or msg.get("caption") or ""
+    chat = (msg.get("chat") or {}).get("id")
+    if not text or not chat:
+        return
+    if text.startswith("/start"):
+        send_telegram("Tempel CA token. Bot balas analisa ID (bukan sinyal beli).", chat_id=str(chat))
+        return
+    if extract_ca(text) or text.startswith("/ca") or text.startswith("/analisa"):
+        handle_ca_message(text.replace("/ca", "").replace("/analisa", ""), str(chat))
+
+
+@app.post("/telegram/hook")
+async def telegram_hook(request: Request):
+    secret = os.getenv("TELEGRAM_HOOK_SECRET", "")
+    if secret and request.query_params.get("secret") != secret:
+        return {"ok": False, "error": "forbidden"}
+    try:
+        upd = await request.json()
+    except Exception:
+        return {"ok": False}
+    try:
+        process_tg_update(upd)
+    except Exception as e:
+        print("tg hook error:", e)
+    return {"ok": True}
+
+
+def poll_telegram():
+    if not TG_TOKEN:
+        return
+    try:
+        if os.path.exists(TG_OFFSET_FILE):
+            TG_OFFSET["id"] = int(json.load(open(TG_OFFSET_FILE)).get("id") or 0)
+    except Exception:
+        pass
+    while True:
+        try:
+            r = SESSION.get(
+                f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                params={"timeout": 25, "offset": TG_OFFSET["id"] + 1},
+                timeout=35,
+            )
+            data = r.json() if r.ok else {}
+            for upd in data.get("result") or []:
+                TG_OFFSET["id"] = max(TG_OFFSET["id"], int(upd.get("update_id") or 0))
+                process_tg_update(upd)
+            try:
+                with open(TG_OFFSET_FILE, "w") as f:
+                    json.dump({"id": TG_OFFSET["id"]}, f)
+            except Exception:
+                pass
+        except Exception as e:
+            print("tg poll error:", e)
+            time.sleep(5)
 
 
 def _usd(n) -> str:
@@ -1965,6 +2119,8 @@ def _start_alerts():
         return
     t = threading.Thread(target=alert_loop, daemon=True)
     t.start()
+    if os.getenv("ENABLE_TG_POLL", "1") == "1":
+        threading.Thread(target=poll_telegram, daemon=True).start()
 
 
 @app.get("/alerts/test")
