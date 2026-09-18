@@ -1004,19 +1004,18 @@ def group_best_by_token(pairs: List[Dict]) -> Dict[str, Dict]:
 
 
 def is_early_setup(row: Dict, mode: str = "balanced") -> bool:
-    """Saringan Discovery: early + struktur waras. Bukan tape hijau."""
-    if row.get("honeypot") or row.get("risk") in ("HONEYPOT", "HIGH"):
+    """Hidden gem: masih early, bukan honeypot. Longgar di tape, kaku di rug."""
+    if row.get("honeypot") or row.get("risk") in ("HONEYPOT",):
         return False
-    chain = str(row.get("chain") or row.get("sector") or "").lower()
+    if mode == "strict" and row.get("risk") == "HIGH":
+        return False
     top10 = float(row.get("top10_pct") or 0)
     holders = int(row.get("holder_count") or 0)
-    if chain == "robinhood" and top10 <= 0 and holders <= 0:
-        return False
     flags = " ".join(str(f).upper() for f in (row.get("flags") or []))
-    if any(x in flags for x in ("HONEYPOT", "CANNOT_SELL", "CANNOT_BUY", "BLACKLIST", "RUGGED", "MINT", "FREEZE")):
+    if any(x in flags for x in ("HONEYPOT", "CANNOT_SELL", "CANNOT_BUY", "BLACKLIST", "RUGGED")):
         return False
     tax = max(float(row.get("sell_tax") or 0), float(row.get("buy_tax") or 0))
-    if tax >= 8:
+    if tax >= 12:
         return False
     liq = float(row.get("liquidity_usd") or 0)
     mcap = float(row.get("market_cap") or 0)
@@ -1027,22 +1026,20 @@ def is_early_setup(row: Dict, mode: str = "balanced") -> bool:
         return False
     ratio = vol / liq
     if mode == "aggressive":
-        age_ok = age is not None and 1.5 <= age <= 36
-        band = 12_000 <= liq <= 220_000 and 20_000 <= mcap <= 550_000
-        tape = 0.35 <= ratio <= 4.0 and 3 <= chg <= 50
+        age_ok = age is None or (0.8 <= age <= 72)
+        band = 6_000 <= liq <= 350_000 and 10_000 <= mcap <= 1_200_000
+        tape = 0.2 <= ratio <= 6.5 and -8 <= chg <= 90
     elif mode == "strict":
-        age_ok = age is not None and 2 <= age <= 18
-        band = 20_000 <= liq <= 120_000 and 30_000 <= mcap <= 300_000
-        tape = 0.5 <= ratio <= 3.0 and 8 <= chg <= 35
+        age_ok = age is not None and 2 <= age <= 30
+        band = 12_000 <= liq <= 180_000 and 20_000 <= mcap <= 500_000
+        tape = 0.35 <= ratio <= 4.2 and 0 <= chg <= 55
     else:
-        age_ok = age is not None and 2 <= age <= 24
-        band = 15_000 <= liq <= 150_000 and 25_000 <= mcap <= 400_000
-        tape = 0.4 <= ratio <= 3.5 and 5 <= chg <= 45
+        age_ok = age is None or (1 <= age <= 48)
+        band = 8_000 <= liq <= 250_000 and 15_000 <= mcap <= 800_000
+        tape = 0.25 <= ratio <= 5.5 and -3 <= chg <= 70
     if not age_ok or not band or not tape:
         return False
-    if top10 >= 25 and holders > 0:
-        return False
-    if str(row.get("upside") or "").upper() in ("WASHY", "THIN", "NO UPSIDE"):
+    if holders > 0 and top10 >= 42:
         return False
     return True
 
@@ -1056,18 +1053,18 @@ def scan_top(
         best_pairs = group_best_by_token(fetch_pairs())
         results = []
         for p in best_pairs.values():
-            if not is_pair_young(p, 36 if mode != "strict" else 24):
+            if not is_pair_young(p, 72 if mode == "aggressive" else (30 if mode == "strict" else 48)):
                 continue
             liq = num(p, "liquidity", "usd")
             vol = num(p, "volume", "h24")
             chg = num(p, "priceChange", "h24")
-            if liq < 12_000 or vol < 5_000:
+            if liq < 6_000 or vol < 3_000:
                 continue
-            if liq > 250_000:
+            if liq > 400_000:
                 continue
-            if vol / max(liq, 1) > 4.2:
+            if vol / max(liq, 1) > 7:
                 continue
-            if chg < 3 or chg > 55:
+            if chg < -10 or chg > 95:
                 continue
             results.append(enrich(p, False))
         results.sort(key=lambda x: x["confidence"], reverse=True)
@@ -1728,7 +1725,7 @@ def donate_buttons() -> dict:
 def send_scan_candidates(chat_id: str) -> None:
     send_telegram("🔍 Scan filter early...", chat_id=chat_id)
     try:
-        rows = scan_top(limit=8, mode="balanced")
+        rows = scan_top(limit=8, mode="aggressive")
     except Exception as e:
         send_telegram(f"Scan gagal: {e}", buttons=menu_buttons(), chat_id=chat_id)
         return
