@@ -211,7 +211,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
     <span id="workerText">background: checking...</span>
   </div>
   <div id="status" class="status">Ready</div>
-  <div class="section-title" id="sectionTitle">Discovery – Early Gems</div>
+  <div class="section-title" id="sectionTitle">Discovery – early ketat</div>
   <table>
     <thead>
       <tr>
@@ -262,7 +262,7 @@ function setView(view) {
   document.getElementById("btnCart").classList.toggle("active", view === "cart");
   document.getElementById("btnCa").classList.toggle("active", view === "ca");
   document.getElementById("sectionTitle").innerText =
-    view === "discovery" ? "Discovery – Early Gems" :
+    view === "discovery" ? "Discovery – early ketat (2–24 jam · mcap 25–400k · vol/liq 0.4–3.5)" :
     view === "quality" ? "Setup Hijau – tape ≥75 · peluang POSSIBLE · aman ≥70" :
     view === "watch" ? "Watch – token tersimpan" :
     view === "narratives" ? "Narasi – klaster volume" :
@@ -741,7 +741,7 @@ async function refreshData() {
     if (!Array.isArray(data) || data.length === 0) {
       status.innerText = currentView === "quality"
         ? "Tidak ada token lolos 3 gerbang hijau. Normal."
-        : "No data found. Coba mode Aggressive.";
+        : "Tidak ada yang lolos filter early. Coba mode Aggressive atau refresh nanti.";
       return;
     }
     const rank = (item) => {
