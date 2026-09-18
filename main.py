@@ -1784,46 +1784,90 @@ def extract_ca(text: str) -> str:
     return ""
 
 
+def _tape_label(row: Dict) -> Tuple[str, str]:
+    b5 = float(row.get("tx_buys_m5") or 0)
+    s5 = float(row.get("tx_sells_m5") or 0)
+    t = b5 + s5
+    if t <= 0:
+        return "NEUTRAL", "➖"
+    p = b5 / t
+    chg5 = float(row.get("price_change_m5") or 0)
+    if p >= 0.68 and chg5 >= 0:
+        return "BUY STRENGTH", "🟢"
+    if p >= 0.58:
+        return "BUY BIAS", "🟢"
+    if p <= 0.32 and chg5 <= 0:
+        return "SELL STRENGTH", "🔴"
+    if p <= 0.42:
+        return "SELL BIAS", "🔴"
+    return "NEUTRAL", "⚪"
+
+
 def analisa_id(row: Dict) -> str:
     rpt = row.get("ca_report") or {}
     tw = str(rpt.get("trend_window") or "WATCH")
     health = rpt.get("health_score")
     aman = rpt.get("safety_score")
     early = is_early_setup(row, "balanced")
-    if row.get("honeypot") or tw == "AVOID":
-        putusan = "JANGAN MASUK"
-    elif not early or tw == "UNLIKELY" or row.get("risk") == "HIGH":
-        putusan = "LEWATI — bukan setup early"
+    tape, tape_ico = _tape_label(row)
+    honey = bool(row.get("honeypot"))
+    risk = str(row.get("risk") or "-")
+    upside = str(row.get("upside") or "-")
+    if honey or tw == "AVOID" or risk in ("HONEYPOT", "HIGH"):
+        sig, sig_ico, putusan = "JANGAN BELI", "🛑", "Honeypot / risiko tinggi / window mati"
+        stars_n = 1
+    elif not early or tw == "UNLIKELY" or upside in ("WASHY", "THIN", "NO UPSIDE"):
+        sig, sig_ico, putusan = "JANGAN BELI", "🚫", "Bukan setup early — wash atau sudah telat"
+        stars_n = 2
+    elif tw == "POSSIBLE" and early and tape.startswith("BUY"):
+        sig, sig_ico, putusan = "BELI SPEKULATIF", "🟢", "Lolos filter early + tape beli. Size kecil."
+        stars_n = 5 if (aman or 0) >= 70 and (health or 0) >= 75 else 4
     elif tw == "POSSIBLE" and early:
-        putusan = "BOLEH DIPANTAU — spekulatif, size kecil"
+        sig, sig_ico, putusan = "PANTAU DULU", "🟡", "Struktur early oke, tape belum jelas"
+        stars_n = 3
     else:
-        putusan = "PANTAS SAJA — jangan kejar"
+        sig, sig_ico, putusan = "JANGAN KEJAR", "⚠️", "Ada ramai, belum cukup untuk masuk"
+        stars_n = 2
+    stars = "⭐" * stars_n + "☆" * (5 - stars_n)
     chg = float(row.get("price_change_24h") or 0)
+    chg_ico = "📈" if chg >= 0 else "📉"
+    honey_txt = "🍯 HONEYPOT" if honey else "✅ bukan honeypot"
+    risk_ico = "🟢" if risk == "LOW" else ("🔴" if risk == "HIGH" else "⚪")
+    win_ico = {"POSSIBLE": "🟢", "WATCH": "🟡", "UNLIKELY": "🔴", "AVOID": "🛑"}.get(tw, "⚪")
+    name = row.get("name") or ""
     lines = [
-        f"<b>Analisa CA</b> ${row.get('symbol') or '-'}",
-        f"{row.get('name') or ''}",
-        f"{str(row.get('chain') or '').upper()} · {row.get('dex') or '-'}",
-        "━━━━━━━━━━━━",
-        f"<b>Putusan:</b> {putusan}",
-        f"Window: {tw}",
-        f"Risk: {row.get('risk') or '-'} · Honey: {'YA' if row.get('honeypot') else 'bukan'}",
-        f"Tape {health if health is not None else '-'} · Aman {aman if aman is not None else '-'}",
-        f"Upside {row.get('upside') or '-'}",
-        "━━━━━━━━━━━━",
-        f"Liq {_usd(row.get('liquidity_usd'))} · MCap {_usd(row.get('market_cap'))}",
-        f"Vol {_usd(row.get('volume_24h'))} · 24h {chg:+.1f}%",
-        f"Umur {row.get('age_hours') or '-'} jam · vol/liq {rpt.get('vol_liq') or '-'}",
-        f"Top10 {row.get('top10_pct') or 0}%",
-        f"LP {row.get('lp_status') or '-'} · Burn {row.get('burn_status') or '-'}",
-        "━━━━━━━━━━━━",
+        f"{sig_ico} <b>SIGNAL {sig}</b>",
+        f"{stars}  <b>{stars_n}/5</b>",
+        f"<i>{putusan}</i>",
+        "",
+        f"💎 <b>${row.get('symbol') or '-'}</b>  {name}",
+        f"⛓️ {str(row.get('chain') or '').upper()} · {row.get('dex') or '-'}",
+        "━━━━━━━━━━━━━━",
+        f"{win_ico} Window     <b>{tw}</b>",
+        f"{tape_ico} Tape       <b>{tape}</b>",
+        f"{risk_ico} Risk       <b>{risk}</b>",
+        f"🎯 Upside     <b>{upside}</b>",
+        f"🧪 {honey_txt}",
+        f"📊 Tape {health if health is not None else '-'} · Aman {aman if aman is not None else '-'}",
+        "━━━━━━━━━━━━━━",
+        f"💧 Liq     {_usd(row.get('liquidity_usd'))}",
+        f"🏦 MCap    {_usd(row.get('market_cap'))}",
+        f"📦 Vol     {_usd(row.get('volume_24h'))}",
+        f"{chg_ico} 24h     {chg:+.1f}%",
+        f"⏱️ Umur    {row.get('age_hours') or '-'} jam",
+        f"📐 Vol/Liq {rpt.get('vol_liq') or '-'}",
+        f"👥 Top10   {row.get('top10_pct') or 0}%",
+        f"🔒 LP {row.get('lp_status') or '-'} · 🔥 {row.get('burn_status') or '-'}",
+        "━━━━━━━━━━━━━━",
+        f"CA",
         f"<code>{row.get('token_address') or '-'}</code>",
     ]
     if row.get("url"):
-        lines.append(f'<a href="{row["url"]}">Chart DexScreener</a>')
+        lines.append(f'📉 <a href="{row["url"]}">Chart DexScreener</a>')
     if row.get("fomo_url"):
-        lines.append(f'<a href="{row["fomo_url"]}">Trade FOMO</a>')
-    note = rpt.get("trend_note") or "Ini saringan, bukan ramalan harga."
-    lines.append(note)
+        lines.append(f'⚡️ <a href="{row["fomo_url"]}">Trade FOMO</a>')
+    lines.append("")
+    lines.append("⚠️ Bukan jaminan untung. Size kecil atau skip.")
     return "\n".join(lines)
 
 
@@ -2026,7 +2070,8 @@ def format_alert(row: Dict) -> str:
 
     chart = f'<a href="{_esc(link)}">DexScreener</a>' if link else "—"
     body = (
-        f"🟢 <b>GREEN GEM</b>\n"
+        f"🟢 <b>GREEN GEM</b> · SIGNAL BELI SPEKULATIF\n"
+        f"⭐⭐⭐⭐☆  4/5\n"
         f"{header}\n"
         f"{chain} · {dex}\n"
         f"━━━━━━━━━━━━━━\n"
