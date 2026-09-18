@@ -1002,6 +1002,50 @@ def group_best_by_token(pairs: List[Dict]) -> Dict[str, Dict]:
     return best
 
 
+def is_early_setup(row: Dict, mode: str = "balanced") -> bool:
+    """Saringan Discovery: early + struktur waras. Bukan tape hijau."""
+    if row.get("honeypot") or row.get("risk") in ("HONEYPOT", "HIGH"):
+        return False
+    chain = str(row.get("chain") or row.get("sector") or "").lower()
+    top10 = float(row.get("top10_pct") or 0)
+    holders = int(row.get("holder_count") or 0)
+    if chain == "robinhood" and top10 <= 0 and holders <= 0:
+        return False
+    flags = " ".join(str(f).upper() for f in (row.get("flags") or []))
+    if any(x in flags for x in ("HONEYPOT", "CANNOT_SELL", "CANNOT_BUY", "BLACKLIST", "RUGGED", "MINT", "FREEZE")):
+        return False
+    tax = max(float(row.get("sell_tax") or 0), float(row.get("buy_tax") or 0))
+    if tax >= 8:
+        return False
+    liq = float(row.get("liquidity_usd") or 0)
+    mcap = float(row.get("market_cap") or 0)
+    vol = float(row.get("volume_24h") or 0)
+    chg = float(row.get("price_change_24h") or 0)
+    age = row.get("age_hours")
+    if liq <= 0 or vol <= 0:
+        return False
+    ratio = vol / liq
+    if mode == "aggressive":
+        age_ok = age is not None and 1.5 <= age <= 36
+        band = 12_000 <= liq <= 220_000 and 20_000 <= mcap <= 550_000
+        tape = 0.35 <= ratio <= 4.0 and 3 <= chg <= 50
+    elif mode == "strict":
+        age_ok = age is not None and 2 <= age <= 18
+        band = 20_000 <= liq <= 120_000 and 30_000 <= mcap <= 300_000
+        tape = 0.5 <= ratio <= 3.0 and 8 <= chg <= 35
+    else:
+        age_ok = age is not None and 2 <= age <= 24
+        band = 15_000 <= liq <= 150_000 and 25_000 <= mcap <= 400_000
+        tape = 0.4 <= ratio <= 3.5 and 5 <= chg <= 45
+    if not age_ok or not band or not tape:
+        return False
+    if top10 >= 25 and holders > 0:
+        return False
+    if str(row.get("upside") or "").upper() in ("WASHY", "THIN", "NO UPSIDE"):
+        return False
+    return True
+
+
 @app.get("/scan/top")
 def scan_top(
     limit: int = 10,
@@ -1011,21 +1055,26 @@ def scan_top(
         best_pairs = group_best_by_token(fetch_pairs())
         results = []
         for p in best_pairs.values():
-            if not is_pair_young(p):
+            if not is_pair_young(p, 36 if mode != "strict" else 24):
                 continue
             liq = num(p, "liquidity", "usd")
             vol = num(p, "volume", "h24")
-            if mode == "strict" and (is_suspicious(p) or liq < 10_000 or vol < 10_000):
+            chg = num(p, "priceChange", "h24")
+            if liq < 12_000 or vol < 5_000:
                 continue
-            if mode == "balanced" and (liq < 1_000 or vol < 1_000):
+            if liq > 250_000:
                 continue
-            if mode == "aggressive" and liq < 300:
+            if vol / max(liq, 1) > 4.2:
+                continue
+            if chg < 3 or chg > 55:
                 continue
             results.append(enrich(p, False))
-        ranked = sorted(results, key=lambda x: x["confidence"], reverse=True)[:limit]
-        secured = attach_security(ranked)
-        remember_tokens(secured)
-        return secured
+        results.sort(key=lambda x: x["confidence"], reverse=True)
+        secured = attach_security(results[:40])
+        picked = [r for r in secured if is_early_setup(r, mode)]
+        picked.sort(key=lambda x: (x.get("confidence") or 0, x.get("score") or 0), reverse=True)
+        remember_tokens(picked[:limit])
+        return picked[:limit]
     except Exception as e:
         print("DISCOVERY ERROR:", e)
         return []
