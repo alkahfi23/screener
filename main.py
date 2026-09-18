@@ -1711,9 +1711,48 @@ def donate_text() -> str:
     )
 
 
+def menu_buttons() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "🔍 Scan kandidat", "callback_data": "scan"}],
+        [{"text": "☕ Donasi USDT", "callback_data": "donasi"}],
+    ]}
+
+
 def donate_buttons() -> dict:
-    row = [{"text": "👛 Buka Wallet Telegram", "url": DONATE_WALLET_URL or "https://t.me/wallet"}]
-    return {"inline_keyboard": [row]}
+    return {"inline_keyboard": [
+        [{"text": "👛 Buka Wallet Telegram", "url": DONATE_WALLET_URL or "https://t.me/wallet"}],
+        [{"text": "🔍 Scan kandidat", "callback_data": "scan"}],
+    ]}
+
+
+def send_scan_candidates(chat_id: str) -> None:
+    send_telegram("🔍 Scan filter early...", chat_id=chat_id)
+    try:
+        rows = scan_top(limit=8, mode="balanced")
+    except Exception as e:
+        send_telegram(f"Scan gagal: {e}", buttons=menu_buttons(), chat_id=chat_id)
+        return
+    if not rows:
+        send_telegram(
+            "🔍 <b>Scan kosong</b>\nTidak ada kandidat lolos filter early sekarang.\nCoba lagi beberapa menit.",
+            buttons=menu_buttons(),
+            chat_id=chat_id,
+        )
+        return
+    lines = [f"🔍 <b>Kandidat early</b> · {len(rows)} token", "Lolos umur/mcap/liq/vol. Tap analisa."]
+    kb = []
+    for i, row in enumerate(rows, 1):
+        addr = row.get("token_address") or ""
+        chg = float(row.get("price_change_24h") or 0)
+        lines.append("")
+        lines.append(f"<b>{i}. ${row.get('symbol') or '-'}</b> · {str(row.get('chain') or '').upper()}")
+        lines.append(f"Liq {_usd(row.get('liquidity_usd'))} · MCap {_usd(row.get('market_cap'))} · 24h {chg:+.1f}%")
+        lines.append(f"<code>{addr}</code>")
+        if addr:
+            kb.append([{"text": f"🔬 Analisa ${row.get('symbol') or i}", "callback_data": "ca:" + addr[:60]}])
+    kb.append([{"text": "🔍 Scan lagi", "callback_data": "scan"}])
+    kb.append([{"text": "☕ Donasi USDT", "callback_data": "donasi"}])
+    send_telegram("\n".join(lines), buttons={"inline_keyboard": kb}, chat_id=chat_id)
 
 
 def tg_buttons(row: Dict) -> dict:
@@ -1727,7 +1766,10 @@ def tg_buttons(row: Dict) -> dict:
         row_btns.append({"text": "📉 DexScreener", "url": dex})
     if row_btns:
         buttons.append(row_btns)
-    buttons.append([{"text": "☕ Donasi USDT", "callback_data": "donasi"}])
+    buttons.append([
+        {"text": "🔍 Scan", "callback_data": "scan"},
+        {"text": "☕ Donasi USDT", "callback_data": "donasi"},
+    ])
     return {"inline_keyboard": buttons}
 
 
@@ -1924,8 +1966,14 @@ def process_tg_update(upd: Dict) -> None:
     if cb:
         chat = ((cb.get("message") or {}).get("chat") or {}).get("id")
         data = str(cb.get("data") or "")
-        if data == "donasi" and chat:
+        if not chat:
+            return
+        if data == "donasi":
             send_telegram(donate_text(), buttons=donate_buttons(), chat_id=str(chat))
+        elif data == "scan":
+            send_scan_candidates(str(chat))
+        elif data.startswith("ca:"):
+            handle_ca_message(data[3:], str(chat))
         return
     msg = upd.get("message") or upd.get("edited_message") or {}
     text = msg.get("text") or msg.get("caption") or ""
@@ -1934,10 +1982,13 @@ def process_tg_update(upd: Dict) -> None:
         return
     if text.startswith("/start"):
         send_telegram(
-            "Tempel <b>CA</b> token.\nBot balas analisa + sinyal.\n/donasi — kirim USDT ke dompet Telegram.",
-            buttons=donate_buttons(),
+            "Tempel <b>CA</b> atau tekan <b>Scan</b>.\n/scan — kandidat lolos filter\n/donasi — USDT",
+            buttons=menu_buttons(),
             chat_id=str(chat),
         )
+        return
+    if text.startswith("/scan") or text.lower() == "scan":
+        send_scan_candidates(str(chat))
         return
     if text.startswith("/donasi") or text.lower() in ("donasi", "donate"):
         send_telegram(donate_text(), buttons=donate_buttons(), chat_id=str(chat))
