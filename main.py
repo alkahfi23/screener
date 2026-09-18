@@ -1639,6 +1639,9 @@ ALERT_MIN_CONF = int(os.getenv("ALERT_MIN_CONF", "70"))
 ALERT_INTERVAL = int(os.getenv("ALERT_INTERVAL_SEC", "180"))
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+DONATE_USDT = os.getenv("DONATE_USDT_ADDRESS", "").strip()
+DONATE_NET = os.getenv("DONATE_USDT_NETWORK", "TON").strip() or "TON"
+DONATE_WALLET_URL = os.getenv("DONATE_WALLET_URL", "https://t.me/wallet").strip()
 SENT_ALERTS = {}
 WORKER = {
     "running": False,
@@ -1697,18 +1700,35 @@ def is_green_signal(row: Dict) -> bool:
     return True
 
 
+def donate_text() -> str:
+    addr = DONATE_USDT or "(set DONATE_USDT_ADDRESS di Render)"
+    return (
+        "☕ <b>Donasi USDT</b>\n"
+        f"Jaringan: <b>{DONATE_NET}</b>\n"
+        "Kirim ke dompet Telegram / address ini:\n"
+        f"<code>{addr}</code>\n"
+        "Salin address, buka Wallet Telegram, kirim USDT."
+    )
+
+
+def donate_buttons() -> dict:
+    row = [{"text": "👛 Buka Wallet Telegram", "url": DONATE_WALLET_URL or "https://t.me/wallet"}]
+    return {"inline_keyboard": [row]}
+
+
 def tg_buttons(row: Dict) -> dict:
     buttons = []
     fomo = fomo_url(row)
     dex = dex_url(row)
     row_btns = []
     if fomo:
-        row_btns.append({"text": "Trade FOMO", "url": fomo})
+        row_btns.append({"text": "⚡️ Trade FOMO", "url": fomo})
     if dex:
-        row_btns.append({"text": "DexScreener", "url": dex})
+        row_btns.append({"text": "📉 DexScreener", "url": dex})
     if row_btns:
         buttons.append(row_btns)
-    return {"inline_keyboard": buttons} if buttons else {}
+    buttons.append([{"text": "☕ Donasi USDT", "callback_data": "donasi"}])
+    return {"inline_keyboard": buttons}
 
 
 def send_telegram(text: str, parse_mode: str = "HTML", buttons: Optional[dict] = None, chat_id: Optional[str] = None) -> bool:
@@ -1891,22 +1911,36 @@ def handle_ca_message(text: str, chat_id: str) -> Dict[str, Any]:
     caption = analisa_id(row)
     icon = row.get("icon") or ""
     if icon:
-        send_telegram_photo(icon, caption[:1024], chat_id=chat_id)
+        send_telegram_photo(icon, caption[:1024], buttons=tg_buttons(row), chat_id=chat_id)
         if len(caption) > 900:
-            send_telegram(caption, chat_id=chat_id)
+            send_telegram(caption, buttons=tg_buttons(row), chat_id=chat_id)
     else:
-        send_telegram(caption, chat_id=chat_id)
+        send_telegram(caption, buttons=tg_buttons(row), chat_id=chat_id)
     return {"ok": True, "symbol": row.get("symbol"), "address": addr}
 
 
 def process_tg_update(upd: Dict) -> None:
+    cb = upd.get("callback_query") or {}
+    if cb:
+        chat = ((cb.get("message") or {}).get("chat") or {}).get("id")
+        data = str(cb.get("data") or "")
+        if data == "donasi" and chat:
+            send_telegram(donate_text(), buttons=donate_buttons(), chat_id=str(chat))
+        return
     msg = upd.get("message") or upd.get("edited_message") or {}
     text = msg.get("text") or msg.get("caption") or ""
     chat = (msg.get("chat") or {}).get("id")
     if not text or not chat:
         return
     if text.startswith("/start"):
-        send_telegram("Tempel CA token. Bot balas analisa ID (bukan sinyal beli).", chat_id=str(chat))
+        send_telegram(
+            "Tempel <b>CA</b> token.\nBot balas analisa + sinyal.\n/donasi — kirim USDT ke dompet Telegram.",
+            buttons=donate_buttons(),
+            chat_id=str(chat),
+        )
+        return
+    if text.startswith("/donasi") or text.lower() in ("donasi", "donate"):
+        send_telegram(donate_text(), buttons=donate_buttons(), chat_id=str(chat))
         return
     if extract_ca(text) or text.startswith("/ca") or text.startswith("/analisa"):
         handle_ca_message(text.replace("/ca", "").replace("/analisa", ""), str(chat))
