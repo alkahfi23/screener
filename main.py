@@ -1862,6 +1862,46 @@ def _tape_label(row: Dict) -> Tuple[str, str]:
     return "NEUTRAL", "⚪"
 
 
+def holder_block(row: Dict) -> Tuple[list, bool, float]:
+    """Blok holder untuk Telegram. Return (lines, dominan, top1_pct)."""
+    top1 = float(row.get("top1_pct") or 0)
+    top10 = float(row.get("top10_pct") or 0)
+    n = row.get("holder_count") or "-"
+    note = row.get("holder_note") or ""
+    holders = row.get("top_holders") or []
+    dominan = top1 >= 10
+    lines = ["━━━━━━━━━━━━━━", "👥 <b>HOLDERS</b>"]
+    if top1 <= 0 and top10 <= 0 and not holders:
+        lines.append("⚪ Data holder kosong (belum dari indexer)")
+        return lines, False, 0.0
+    if dominan:
+        lines.append(f"🚨 <b>PERINGATAN: holder dominan</b>")
+        lines.append(f"Top1 pegang <b>{top1:.1f}%</b> (≥10%) — risiko dump tinggi")
+    else:
+        lines.append(f"✅ Top1 {top1:.1f}% · tidak dominan (&lt;10%)")
+    lines.append(f"Top10 {top10:.1f}% · n={n}")
+    if note:
+        lines.append(f"Catatan: {note}")
+    shown = 0
+    for h in holders[:5]:
+        if not isinstance(h, dict):
+            continue
+        pct = float(h.get("pct") or 0)
+        label = str(h.get("label") or "").lower()
+        if any(x in label for x in ("pool", "raydium", "lp", "pump", "pair")):
+            continue
+        addr = str(h.get("address") or "")
+        short = (addr[:4] + "…" + addr[-4:]) if len(addr) > 10 else addr
+        flag = " 🚨" if pct >= 10 else ""
+        lines.append(f"• {pct:.1f}% <code>{short}</code>{flag}")
+        shown += 1
+        if shown >= 4:
+            break
+    if not shown and top1 > 0:
+        lines.append(f"• Top1 non-LP {top1:.1f}%")
+    return lines, dominan, top1
+
+
 def analisa_id(row: Dict) -> str:
     rpt = row.get("ca_report") or {}
     tw = str(rpt.get("trend_window") or "WATCH")
@@ -1872,14 +1912,21 @@ def analisa_id(row: Dict) -> str:
     honey = bool(row.get("honeypot"))
     risk = str(row.get("risk") or "-")
     upside = str(row.get("upside") or "-")
+    h_lines, dominan, top1 = holder_block(row)
     if honey or tw == "AVOID" or risk in ("HONEYPOT", "HIGH"):
         sig, sig_ico, putusan = "JANGAN BELI", "🛑", "Honeypot / risiko tinggi / window mati"
+        stars_n = 1
+    elif dominan and top1 >= 20:
+        sig, sig_ico, putusan = "JANGAN BELI", "🚨", f"Holder dominan {top1:.1f}% — mudah di-dump"
         stars_n = 1
     elif not early or tw == "UNLIKELY" or upside in ("WASHY", "THIN", "NO UPSIDE"):
         sig, sig_ico, putusan = "JANGAN BELI", "🚫", "Bukan setup early — wash atau sudah telat"
         stars_n = 2
+    elif dominan:
+        sig, sig_ico, putusan = "JANGAN KEJAR", "🚨", f"Top holder {top1:.1f}% ≥10% — risiko konsentrasi"
+        stars_n = 2
     elif tw == "POSSIBLE" and early and tape.startswith("BUY"):
-        sig, sig_ico, putusan = "BELI SPEKULATIF", "🟢", "Lolos filter early + tape beli. Size kecil."
+        sig, sig_ico, putusan = "BELI SPEKULATIF", "🟢", "Lolos filter early + tape beli + holder waras. Size kecil."
         stars_n = 5 if (aman or 0) >= 70 and (health or 0) >= 75 else 4
     elif tw == "POSSIBLE" and early:
         sig, sig_ico, putusan = "PANTAU DULU", "🟡", "Struktur early oke, tape belum jelas"
@@ -1915,12 +1962,12 @@ def analisa_id(row: Dict) -> str:
         f"{chg_ico} 24h     {chg:+.1f}%",
         f"⏱️ Umur    {row.get('age_hours') or '-'} jam",
         f"📐 Vol/Liq {rpt.get('vol_liq') or '-'}",
-        f"👥 Top10   {row.get('top10_pct') or 0}%",
         f"🔒 LP {row.get('lp_status') or '-'} · 🔥 {row.get('burn_status') or '-'}",
-        "━━━━━━━━━━━━━━",
-        f"CA",
-        f"<code>{row.get('token_address') or '-'}</code>",
     ]
+    lines.extend(h_lines)
+    lines.append("━━━━━━━━━━━━━━")
+    lines.append("CA")
+    lines.append(f"<code>{row.get('token_address') or '-'}</code>")
     if row.get("url"):
         lines.append(f'📉 <a href="{row["url"]}">Chart DexScreener</a>')
     if row.get("fomo_url"):
@@ -2173,15 +2220,32 @@ def format_alert(row: Dict) -> str:
     if creator:
         body += f"Dev  <code>{creator}</code>\n"
         body += f"Dev tx  https://solscan.io/account/{creator}\n"
+    top1 = float(row.get("top1_pct") or 0)
+    top10 = float(row.get("top10_pct") or 0)
     note = _esc(row.get("holder_note") or "")
+    body += "━━━━━━━━━━━━━━\n👥 HOLDERS\n"
+    if top1 >= 10:
+        body += f"🚨 PERINGATAN holder dominan Top1 <b>{top1:.1f}%</b> (≥10%)\n"
+    elif top1 > 0:
+        body += f"✅ Top1 {top1:.1f}% · tidak dominan\n"
+    else:
+        body += "⚪ Data holder kosong\n"
+    body += f"Top10 {top10:.1f}% · n={row.get('holder_count') or '-'}\n"
     if note:
-        body += (
-            f"Holders  {note}\n"
-            f"Top1 {row.get('top1_pct') or 0}% · Top10 {row.get('top10_pct') or 0}%"
-            f" · n={row.get('holder_count') or '-'}\n"
-        )
-        if row.get("lp_locked") is not None:
-            body += f"LP lock  {row.get('lp_locked')} {row.get('lp_locked_pct') or ''}%\n"
+        body += f"{note}\n"
+    for h in (row.get("top_holders") or [])[:4]:
+        if not isinstance(h, dict):
+            continue
+        pct = float(h.get("pct") or 0)
+        label = str(h.get("label") or "").lower()
+        if any(x in label for x in ("pool", "raydium", "lp", "pump", "pair")):
+            continue
+        addr = str(h.get("address") or "")
+        short = (addr[:4] + "…" + addr[-4:]) if len(addr) > 10 else addr
+        mark = " 🚨" if pct >= 10 else ""
+        body += f"• {pct:.1f}% <code>{_esc(short)}</code>{mark}\n"
+    if row.get("lp_locked") is not None:
+        body += f"LP lock  {row.get('lp_locked')} {row.get('lp_locked_pct') or ''}%\n"
     fomo = fomo_url(row)
     body += f"Social  {social}\n"
     body += f"Chart   {chart}\n"
