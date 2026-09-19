@@ -661,22 +661,40 @@ def check_goplus_solana(address: str) -> Dict:
     }
 
 
+def _is_lp_holder(label: str, addr: str = "") -> bool:
+    low = f"{label} {addr}".lower()
+    keys = (
+        "pool", "raydium", "lp", "pump", "pair", "liquidity", "univ2", "univ3",
+        "pancake", "aerodrome", "camelot", "sushiswap", "curve", "balancer",
+        "vault", "router",
+    )
+    return any(k in low for k in keys)
+
+
 def _holder_snapshot(data: Dict) -> Dict:
     holders = data.get("topHolders") or []
     creator = data.get("creator") or ""
     top = []
     insider_pct = 0.0
     top10 = 0.0
-    for h in holders[:12]:
+    lp_pct_sum = 0.0
+    for h in holders[:15]:
         if not isinstance(h, dict):
             continue
         pct = float(h.get("pct") or h.get("percentage") or 0)
         addr = h.get("address") or h.get("owner") or h.get("wallet") or ""
         insider = bool(h.get("insider") or h.get("isInsider"))
         label = str(h.get("label") or "")
-        top.append({"address": addr, "pct": round(pct, 2), "insider": insider, "label": label})
-        low = label.lower()
-        if any(x in low for x in ("pool", "raydium", "lp", "pump")):
+        is_lp = _is_lp_holder(label, addr)
+        top.append({
+            "address": addr,
+            "pct": round(pct, 2),
+            "insider": insider,
+            "label": label,
+            "is_lp": is_lp,
+        })
+        if is_lp:
+            lp_pct_sum += pct
             continue
         top10 += pct
         if insider:
@@ -690,28 +708,39 @@ def _holder_snapshot(data: Dict) -> Dict:
         flags_h.append("INSIDER_NETWORK")
     if data.get("rugged"):
         flags_h.append("CREATOR_RUGGED")
-    top1 = top[0]["pct"] if top else 0
-    non_lp = [h for h in top if "pool" not in str(h.get("label") or "").lower() and "lp" not in str(h.get("label") or "").lower()]
-    top1_nonlp = non_lp[0]["pct"] if non_lp else 0
+    top1_raw = float(top[0]["pct"]) if top else 0.0
+    non_lp = [h for h in top if not h.get("is_lp")]
+    top1_whale = float(non_lp[0]["pct"]) if non_lp else 0.0
+    # top1_pct = whale terbesar non-LP (untuk peringatan dump)
+    top1_pct = top1_whale
     lp_locked = data.get("lpLocked")
     if lp_locked is None:
         markets = data.get("markets") or []
         if markets and isinstance(markets[0], dict):
             lp_locked = markets[0].get("lpLocked")
     lp_pct = data.get("lpLockedPct")
-    if "CREATOR_RUGGED" in flags_h:
+    if top1_whale >= 10:
+        flags_h.append("DOMINANT_HOLDER")
+        note = f"holder dominan non-LP {top1_whale:.1f}% (≥10%)"
+    elif "CREATOR_RUGGED" in flags_h:
         note = "creator punya jejak rug"
     elif "INSIDER_CLUSTER" in flags_h or "INSIDER_NETWORK" in flags_h:
         note = "cluster insider/bundler"
-    elif top10 >= 50:
-        note = "top holder non-LP kuasai supply"
+    elif top10 >= 40:
+        note = "top holder non-LP cukup terkonsentrasi"
+    elif top1_raw >= 15 and top and top[0].get("is_lp"):
+        note = f"top1 adalah LP pool ~{top1_raw:.1f}% (bukan whale)"
+    elif top1_whale <= 0 and top1_raw <= 0:
+        note = "data holder kosong"
     else:
-        note = "sebaran holder biasa"
+        note = "sebaran holder non-LP relatif biasa"
     return {
         "creator": creator or "",
         "top_holders": top[:8],
-        "top1_pct": round(float(top1_nonlp or top1), 2),
+        "top1_pct": round(top1_pct, 2),
+        "top1_raw_pct": round(top1_raw, 2),
         "top10_pct": round(top10, 2),
+        "lp_holder_pct": round(lp_pct_sum, 2),
         "insider_pct": round(insider_pct, 2),
         "holder_count": data.get("totalHolders") or data.get("holderCount") or len(holders),
         "lp_locked": bool(lp_locked) if lp_locked is not None else None,
@@ -890,9 +919,13 @@ def attach_security(rows: List[Dict]) -> List[Dict]:
         row["insider_pct"] = sec.get("insider_pct") or 0
         row["holder_note"] = sec.get("holder_note") or ""
         row["top1_pct"] = sec.get("top1_pct") or 0
+        row["top1_raw_pct"] = sec.get("top1_raw_pct") or 0
+        row["lp_holder_pct"] = sec.get("lp_holder_pct") or 0
         row["holder_count"] = sec.get("holder_count") or 0
         row["lp_locked"] = sec.get("lp_locked")
         row["lp_locked_pct"] = sec.get("lp_locked_pct")
+        if "DOMINANT_HOLDER" in (sec.get("holder_flags") or []):
+            row["flags"] = list(row.get("flags") or []) + ["DOMINANT_HOLDER"]
         mech = detect_mechanics(row)
         row["lp_status"] = mech["lp_status"]
         row["burn_status"] = mech["burn_status"]
@@ -1863,42 +1896,45 @@ def _tape_label(row: Dict) -> Tuple[str, str]:
 
 
 def holder_block(row: Dict) -> Tuple[list, bool, float]:
-    """Blok holder untuk Telegram. Return (lines, dominan, top1_pct)."""
+    """Blok holder untuk Telegram. Return (lines, dominan, top1_whale)."""
     top1 = float(row.get("top1_pct") or 0)
+    top1_raw = float(row.get("top1_raw_pct") or 0)
     top10 = float(row.get("top10_pct") or 0)
+    lp_h = float(row.get("lp_holder_pct") or 0)
     n = row.get("holder_count") or "-"
     note = row.get("holder_note") or ""
     holders = row.get("top_holders") or []
     dominan = top1 >= 10
     lines = ["━━━━━━━━━━━━━━", "👥 <b>HOLDERS</b>"]
-    if top1 <= 0 and top10 <= 0 and not holders:
+    if top1 <= 0 and top10 <= 0 and top1_raw <= 0 and not holders:
         lines.append("⚪ Data holder kosong (belum dari indexer)")
         return lines, False, 0.0
     if dominan:
-        lines.append(f"🚨 <b>PERINGATAN: holder dominan</b>")
-        lines.append(f"Top1 pegang <b>{top1:.1f}%</b> (≥10%) — risiko dump tinggi")
+        lines.append("🚨 <b>PERINGATAN: whale dominan</b>")
+        lines.append(f"Whale non-LP Top1 <b>{top1:.1f}%</b> (≥10%) — risiko dump")
     else:
-        lines.append(f"✅ Top1 {top1:.1f}% · tidak dominan (&lt;10%)")
-    lines.append(f"Top10 {top10:.1f}% · n={n}")
+        lines.append(f"✅ Whale Top1 {top1:.1f}% · tidak dominan (&lt;10%)")
+    if lp_h > 0 or (top1_raw >= 10 and top1_raw != top1):
+        lines.append(f"🏦 LP pool di holder list ~{lp_h or top1_raw:.1f}% (bukan whale)")
+    lines.append(f"Top10 non-LP {top10:.1f}% · n={n}")
     if note:
         lines.append(f"Catatan: {note}")
     shown = 0
-    for h in holders[:5]:
+    for h in holders[:8]:
         if not isinstance(h, dict):
             continue
         pct = float(h.get("pct") or 0)
-        label = str(h.get("label") or "").lower()
-        if any(x in label for x in ("pool", "raydium", "lp", "pump", "pair")):
-            continue
+        is_lp = bool(h.get("is_lp")) or _is_lp_holder(str(h.get("label") or ""), str(h.get("address") or ""))
         addr = str(h.get("address") or "")
         short = (addr[:4] + "…" + addr[-4:]) if len(addr) > 10 else addr
-        flag = " 🚨" if pct >= 10 else ""
-        lines.append(f"• {pct:.1f}% <code>{short}</code>{flag}")
-        shown += 1
+        if is_lp:
+            lines.append(f"• {pct:.1f}% <code>{short}</code> 🏦 LP")
+        else:
+            flag = " 🚨" if pct >= 10 else ""
+            lines.append(f"• {pct:.1f}% <code>{short}</code>{flag}")
+            shown += 1
         if shown >= 4:
             break
-    if not shown and top1 > 0:
-        lines.append(f"• Top1 non-LP {top1:.1f}%")
     return lines, dominan, top1
 
 
