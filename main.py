@@ -50,10 +50,12 @@ os.makedirs(DATA_DIR, exist_ok=True)
 WATCH_FILE = os.path.join(DATA_DIR, "watchlist.json")
 CART_FILE = os.path.join(DATA_DIR, "cart.json")
 WALLET_FILE = os.path.join(DATA_DIR, "wallets.json")
+SIGNAL_FILE = os.path.join(DATA_DIR, "signal_stats.json")
 WATCH_MAX_AGE_HOURS = 14 * 24
 WATCH_LOCK = threading.Lock()
 CART_LOCK = threading.Lock()
 WALLET_LOCK = threading.Lock()
+SIGNAL_LOCK = threading.Lock()
 
 
 def load_watch() -> Dict[str, Dict]:
@@ -1744,6 +1746,7 @@ def donate_text() -> str:
 def menu_buttons() -> dict:
     return {"inline_keyboard": [
         [{"text": "🔍 Scan kandidat", "callback_data": "scan"}],
+        [{"text": "📊 Statistik signal", "callback_data": "stats"}],
         [{"text": "☕ Donasi USDT", "callback_data": "donasi"}],
     ]}
 
@@ -2052,6 +2055,9 @@ def process_tg_update(upd: Dict) -> None:
             send_telegram(donate_text(), buttons=donate_buttons(), chat_id=str(chat))
         elif data == "scan":
             send_scan_candidates(str(chat))
+        elif data == "stats":
+            stats = refresh_signal_stats()
+            send_telegram(format_stats_msg(stats), buttons=menu_buttons(), chat_id=str(chat))
         elif data.startswith("ca:"):
             handle_ca_message(data[3:], str(chat))
         return
@@ -2069,6 +2075,10 @@ def process_tg_update(upd: Dict) -> None:
         return
     if text.startswith("/scan") or text.lower() == "scan":
         send_scan_candidates(str(chat))
+        return
+    if text.startswith("/stats") or text.lower() in ("stats", "statistik", "winrate"):
+        stats = refresh_signal_stats()
+        send_telegram(format_stats_msg(stats), buttons=menu_buttons(), chat_id=str(chat))
         return
     if text.startswith("/donasi") or text.lower() in ("donasi", "donate"):
         send_telegram(donate_text(), buttons=donate_buttons(), chat_id=str(chat))
@@ -2290,13 +2300,179 @@ def format_alert(row: Dict) -> str:
     return body
 
 
+def load_signals() -> List[Dict]:
+    if not os.path.exists(SIGNAL_FILE):
+        return []
+    try:
+        with open(SIGNAL_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print("signal load error:", e)
+        return []
+
+
+def save_signals(rows: List[Dict]) -> None:
+    tmp = SIGNAL_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rows[-500:], f, ensure_ascii=False)
+    os.replace(tmp, SIGNAL_FILE)
+
+
+def record_signal(row: Dict, source: str = "alert") -> None:
+    px = _price_float(row.get("price_usd"))
+    addr = (row.get("token_address") or "").strip()
+    if not addr:
+        return
+    key = f"{str(row.get('chain') or '').lower()}:{addr.lower()}"
+    with SIGNAL_LOCK:
+        rows = load_signals()
+        for r in rows:
+            if r.get("key") == key and (time.time() - float(r.get("ts") or 0)) < 6 * 3600:
+                return
+        rows.append({
+            "key": key,
+            "ts": time.time(),
+            "source": source,
+            "symbol": row.get("symbol") or "?",
+            "name": row.get("name") or "",
+            "chain": str(row.get("chain") or "").lower(),
+            "token_address": addr,
+            "pair_address": row.get("pair_address") or "",
+            "entry_price": px,
+            "entry_mcap": float(row.get("market_cap") or 0),
+            "last_price": px,
+            "last_mcap": float(row.get("market_cap") or 0),
+            "pnl_pct": 0.0,
+            "status": "OPEN",
+            "url": row.get("url") or "",
+        })
+        save_signals(rows)
+
+
+def refresh_signal_stats() -> Dict:
+    with SIGNAL_LOCK:
+        rows = load_signals()
+    if not rows:
+        return {"total": 0, "open": 0, "win": 0, "loss": 0, "flat": 0, "winrate": 0, "avg_pnl": 0, "items": []}
+    addrs = list({r.get("token_address") for r in rows if r.get("token_address")})
+    price_map: Dict[str, float] = {}
+    mcap_map: Dict[str, float] = {}
+    try:
+        pairs = fetch_pairs_for_tokens(addrs[:40])
+        for p in pairs:
+            base = ((p.get("baseToken") or {}).get("address") or "").lower()
+            if not base:
+                continue
+            px = _price_float((p.get("priceUsd")))
+            mc = num(p, "marketCap") or num(p, "fdv")
+            if px and base not in price_map:
+                price_map[base] = px
+            if mc and base not in mcap_map:
+                mcap_map[base] = float(mc)
+    except Exception as e:
+        print("signal refresh price error:", e)
+    win = loss = flat = open_n = 0
+    pnls = []
+    now = time.time()
+    updated = []
+    for r in rows:
+        addr = (r.get("token_address") or "").lower()
+        entry = float(r.get("entry_price") or 0)
+        last = price_map.get(addr) or float(r.get("last_price") or 0)
+        if last and entry > 0:
+            pnl = (last / entry - 1.0) * 100.0
+            r["last_price"] = last
+            r["pnl_pct"] = round(pnl, 2)
+            if mcap_map.get(addr):
+                r["last_mcap"] = mcap_map[addr]
+            age_h = (now - float(r.get("ts") or now)) / 3600
+            # closed-ish after 24h for stats; still track OPEN under 24h
+            if age_h >= 24 or abs(pnl) >= 3:
+                if pnl >= 5:
+                    r["status"] = "WIN"
+                    win += 1
+                elif pnl <= -5:
+                    r["status"] = "LOSS"
+                    loss += 1
+                else:
+                    r["status"] = "FLAT"
+                    flat += 1
+            else:
+                r["status"] = "OPEN"
+                open_n += 1
+            pnls.append(pnl)
+        else:
+            r["status"] = r.get("status") or "OPEN"
+            open_n += 1
+        updated.append(r)
+    with SIGNAL_LOCK:
+        save_signals(updated)
+    decided = win + loss
+    wr = round(win / decided * 100, 1) if decided else 0.0
+    avg = round(sum(pnls) / len(pnls), 2) if pnls else 0.0
+    return {
+        "total": len(updated),
+        "open": open_n,
+        "win": win,
+        "loss": loss,
+        "flat": flat,
+        "winrate": wr,
+        "avg_pnl": avg,
+        "items": sorted(updated, key=lambda x: float(x.get("ts") or 0), reverse=True)[:20],
+    }
+
+
+def format_stats_msg(stats: Dict) -> str:
+    total = stats.get("total") or 0
+    win = stats.get("win") or 0
+    loss = stats.get("loss") or 0
+    flat = stats.get("flat") or 0
+    open_n = stats.get("open") or 0
+    wr = stats.get("winrate") or 0
+    avg = stats.get("avg_pnl") or 0
+    decided = win + loss
+    lines = [
+        "📊 <b>STATISTIK SIGNAL TELEGRAM</b>",
+        "━━━━━━━━━━━━━━",
+        f"Total sinyal   <b>{total}</b>",
+        f"🟢 WIN         <b>{win}</b>",
+        f"🔴 LOSS        <b>{loss}</b>",
+        f"⚪ FLAT        <b>{flat}</b>",
+        f"⏳ OPEN        <b>{open_n}</b>",
+        "━━━━━━━━━━━━━━",
+        f"Winrate        <b>{wr}%</b>  ({win}/{decided or 0} decided)",
+        f"Avg PnL        <b>{avg:+.2f}%</b>",
+        "",
+        "Rules: WIN ≥+5% · LOSS ≤−5% · dihitung dari harga saat alert.",
+        "OPEN = belum 24 jam / gerak &lt;3%.",
+    ]
+    for it in (stats.get("items") or [])[:8]:
+        pnl = float(it.get("pnl_pct") or 0)
+        st = it.get("status") or "OPEN"
+        ico = {"WIN": "🟢", "LOSS": "🔴", "FLAT": "⚪", "OPEN": "⏳"}.get(st, "•")
+        age_h = (time.time() - float(it.get("ts") or time.time())) / 3600
+        lines.append(
+            f"{ico} <b>${it.get('symbol')}</b> {pnl:+.1f}% · {st} · {age_h:.1f}j"
+        )
+    return "\n".join(lines)
+
+
 def notify_token(row: Dict) -> bool:
     caption = format_alert(row)
     buttons = tg_buttons(row)
     icon = row.get("icon") or ""
+    ok = False
     if icon and send_telegram_photo(icon, caption, buttons):
-        return True
-    return send_telegram(caption, buttons=buttons)
+        ok = True
+    else:
+        ok = send_telegram(caption, buttons=buttons)
+    if ok:
+        try:
+            record_signal(row, source="alert")
+        except Exception as e:
+            print("record_signal error:", e)
+    return ok
 
 
 def run_alert_pass() -> Dict:
@@ -2374,6 +2550,11 @@ def alerts_status():
         "last_error": WORKER.get("last_error") or "",
         "sent_cache": len(SENT_ALERTS),
     }
+
+
+@app.get("/alerts/stats")
+def alerts_stats():
+    return refresh_signal_stats()
 
 
 @app.get("/")
