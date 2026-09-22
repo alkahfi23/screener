@@ -282,34 +282,26 @@ def fetch_pairs_for_tokens(addresses: List[str]) -> List[Dict]:
 
 
 # ---------- Yodao Pump.fun API (https://dev.yodao.io) ----------
-YODAO_API = os.getenv("YODAO_API_BASE", "https://api2.yodao.io").rstrip("/")
+YODAO_API = os.getenv("YODAO_API_BASE", "https://dev.yodao.io").rstrip("/")
 YODAO_CACHE = {"ts": 0, "rows": []}
 YODAO_TTL = 8
 
 
+def _yodao_pct(v) -> float:
+    """Yodao kadang 0–1 fraction, kadang sudah 0–100."""
+    try:
+        x = float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if 0 < x <= 1.5:
+        return round(x * 100.0, 2)
+    return round(x, 2)
+
+
 def fetch_yodao_meme(filters: Optional[Dict] = None) -> Dict:
-    """POST /api/v2/meme — new / completing / graduated pump.fun pools."""
-    body = filters or {
-        "type": "all",
-        "newPools": {
-            "holders": {"min": 12},
-            "volumeUsd": {"min": 1500},
-            "devHoldingPct": {"max": 18},
-            "top10HoldingPct": {"max": 40},
-            "snipersHoldingPct": {"max": 25},
-            "bundlersHoldingPct": {"max": 20},
-        },
-        "completing": {
-            "holders": {"min": 20},
-            "volumeUsd": {"min": 3000},
-            "devHoldingPct": {"max": 15},
-        },
-        "graduated": {
-            "holders": {"min": 30},
-            "volumeUsd": {"min": 5000},
-            "mCapUsd": {"max": 900_000},
-        },
-    }
+    """POST /api/v2/meme — base hidup: https://dev.yodao.io (api2 sering DNS mati)."""
+    # body kosong = semua pool (filter ketat bikin 0 hasil)
+    body = filters if filters is not None else {}
     try:
         r = SESSION.post(
             f"{YODAO_API}/api/v2/meme",
@@ -317,7 +309,7 @@ def fetch_yodao_meme(filters: Optional[Dict] = None) -> Dict:
             headers={"Content-Type": "application/json", "x-socket-id": "hybrid-gem-scanner"},
             timeout=18,
         )
-        if not r.ok:
+        if r.status_code not in (200, 201):
             print("yodao meme status:", r.status_code, r.text[:200])
             return {}
         data = r.json()
@@ -328,7 +320,7 @@ def fetch_yodao_meme(filters: Optional[Dict] = None) -> Dict:
 
 
 def fetch_yodao_market(mint: str) -> Dict:
-    """GET /api/v2/search/tokens/:mint/market-data"""
+    """GET /api/v2/search/tokens/:mint/market-data (response kadang list)."""
     if not mint:
         return {}
     try:
@@ -339,6 +331,8 @@ def fetch_yodao_market(mint: str) -> Dict:
         if not r.ok:
             return {}
         data = r.json()
+        if isinstance(data, list):
+            return data[0] if data and isinstance(data[0], dict) else {}
         return data if isinstance(data, dict) else {}
     except Exception as e:
         print("yodao market error:", e)
@@ -353,13 +347,13 @@ def yodao_pool_to_row(p: Dict, stage: str = "new") -> Dict:
     vol = float(p.get("vol_24h") or 0)
     buys = float(p.get("tx_24h_buy") or 0)
     sells = float(p.get("tx_24h_sell") or 0)
-    top10 = float(p.get("top_10_percent") or 0)
+    top10 = _yodao_pct(p.get("top_10_percent"))
     holders = int(p.get("holders") or 0)
-    creator_pct = float(p.get("creator_holding") or p.get("creator_holding_pct") or 0)
-    snipers = float(p.get("snipers_holding") or 0)
-    insiders = float(p.get("insiders_holding") or 0)
-    bundle = float(p.get("bundle_holding") or 0)
-    fresh = float(p.get("fresh_wallets_holding") or 0)
+    creator_pct = _yodao_pct(p.get("creator_holding") or p.get("creator_holding_pct"))
+    snipers = _yodao_pct(p.get("snipers_holding"))
+    insiders = _yodao_pct(p.get("insiders_holding"))
+    bundle = _yodao_pct(p.get("bundle_holding"))
+    fresh = _yodao_pct(p.get("fresh_wallets_holding") or p.get("fresh_wallet_holding"))
     pro = float(p.get("pro_traders_holding") or p.get("pro_traders") or 0)
     pct_done = float(p.get("pct_completion") or 0)
     ts = p.get("timestamp") or ""
@@ -468,12 +462,21 @@ def fetch_yodao_rows(force: bool = False) -> List[Dict]:
     now = time.time()
     if not force and YODAO_CACHE["rows"] and now - YODAO_CACHE["ts"] < YODAO_TTL:
         return list(YODAO_CACHE["rows"])
-    data = fetch_yodao_meme()
+    data = fetch_yodao_meme({})
     rows = []
     for stage in ("new", "completing", "graduated"):
         for p in data.get(stage) or []:
-            if isinstance(p, dict) and p.get("mint"):
-                rows.append(yodao_pool_to_row(p, stage))
+            if not isinstance(p, dict) or not p.get("mint"):
+                continue
+            row = yodao_pool_to_row(p, stage)
+            # soft filter client-side (jangan terlalu kaku)
+            mcap = float(row.get("market_cap") or 0)
+            holders = int(row.get("holder_count") or 0)
+            if mcap > 0 and mcap < 500:
+                continue
+            if holders == 0 and mcap < 1000:
+                continue
+            rows.append(row)
     YODAO_CACHE["rows"] = rows
     YODAO_CACHE["ts"] = now
     return rows
@@ -488,13 +491,13 @@ def apply_yodao_enrich(row: Dict) -> Dict:
     md = fetch_yodao_market(mint)
     if not md:
         return row
-    top10 = float(md.get("top_10_percent") or row.get("top10_pct") or 0)
+    top10 = _yodao_pct(md.get("top_10_percent") or row.get("top10_pct"))
     holders = int(md.get("holders") or row.get("holder_count") or 0)
-    dev = float(md.get("creator_holding_pct") or md.get("creator_holding") or 0)
-    snipers = float(md.get("snipers_holding") or 0)
-    insiders = float(md.get("insiders_holding") or 0)
-    bundle = float(md.get("bundle_holding") or 0)
-    fresh = float(md.get("fresh_wallet_holding") or md.get("fresh_wallets_holding") or 0)
+    dev = _yodao_pct(md.get("creator_holding_pct") or md.get("creator_holding"))
+    snipers = _yodao_pct(md.get("snipers_holding"))
+    insiders = _yodao_pct(md.get("insiders_holding"))
+    bundle = _yodao_pct(md.get("bundle_holding"))
+    fresh = _yodao_pct(md.get("fresh_wallet_holding") or md.get("fresh_wallets_holding"))
     liq = float(md.get("liquidity") or row.get("liquidity_usd") or 0)
     mcap = float(md.get("market_cap") or row.get("market_cap") or 0)
     vol = float(md.get("vol_24h") or row.get("volume_24h") or 0)
