@@ -541,6 +541,178 @@ def apply_yodao_enrich(row: Dict) -> Dict:
     return row
 
 
+# ---------- FOMO API (https://fomoapi.io/docs) ----------
+FOMO_API = os.getenv("FOMO_API_BASE", "https://api.fomoapi.io").rstrip("/")
+FOMO_API_KEY = os.getenv("FOMO_API_KEY", "").strip()
+FOMO_CACHE = {"ts": 0, "rows": []}
+FOMO_TTL = 60
+
+
+def _fomo_headers() -> Dict:
+    h = {"Accept": "application/json"}
+    if FOMO_API_KEY:
+        h["authorization"] = f"Bearer {FOMO_API_KEY}"
+    return h
+
+
+def fomo_get(path: str, params: Optional[Dict] = None) -> Any:
+    if not FOMO_API_KEY:
+        return {"error": "FOMO_API_KEY kosong — ambil gratis di https://fomoapi.io/dashboard"}
+    try:
+        r = SESSION.get(
+            f"{FOMO_API}{path}",
+            headers=_fomo_headers(),
+            params=params or {},
+            timeout=15,
+        )
+        if r.status_code == 401:
+            return {"error": "FOMO key invalid / missing"}
+        if r.status_code == 402:
+            return {"error": "FOMO credits exhausted"}
+        if not r.ok:
+            return {"error": f"FOMO HTTP {r.status_code}", "body": r.text[:200]}
+        return r.json()
+    except Exception as e:
+        print("fomo_get error:", e)
+        return {"error": str(e)}
+
+
+def fomo_token_to_row(t: Dict, board: str) -> Dict:
+    tok = t.get("token") if isinstance(t.get("token"), dict) else {}
+    addr = (tok.get("address") or t.get("address") or "").strip()
+    symbol = tok.get("symbol") or t.get("symbol") or "?"
+    name = tok.get("name") or t.get("name") or ""
+    network = str(t.get("network") or t.get("chain") or "solana").lower()
+    if "robinhood" in network or network in ("4663", "rh"):
+        chain = "robinhood"
+    elif network in ("ethereum", "eth", "1"):
+        chain = "ethereum"
+    elif network in ("base", "8453"):
+        chain = "base"
+    elif network in ("bsc", "56"):
+        chain = "bsc"
+    else:
+        chain = "solana"
+    mcap = float(t.get("marketCapUsd") or t.get("marketCap") or 0)
+    px = t.get("priceUsd") or t.get("price")
+    chg = float(t.get("change24h") or t.get("priceChange24h") or 0)
+    holders = t.get("holders")
+    return {
+        "symbol": symbol,
+        "name": name,
+        "token_address": addr,
+        "chain": chain,
+        "sector": chain.upper(),
+        "dex": "fomo",
+        "score": 60,
+        "confidence": 70,
+        "pressure": "BUY PRESSURE" if chg > 0 else "NEUTRAL",
+        "verdict": f"FOMO {board.upper()}",
+        "whale": "FOMO SMART MONEY",
+        "flow": "NEUTRAL",
+        "liquidity_usd": 0,
+        "market_cap": mcap,
+        "volume_24h": 0,
+        "price_change_24h": chg,
+        "price_usd": px,
+        "age_hours": None,
+        "pair_address": "",
+        "url": f"https://dexscreener.com/{chain}/{addr}" if addr else "",
+        "upside": "HIGH ROOM" if mcap and mcap < 500_000 else "SPECULATIVE",
+        "upside_note": f"fomo board {board}",
+        "icon": t.get("image") or "",
+        "socials": [],
+        "websites": [],
+        "honeypot": False,
+        "risk": "UNKNOWN",
+        "flags": [f"FOMO_{board.upper()}"],
+        "buy_tax": 0,
+        "sell_tax": 0,
+        "sec_provider": "fomoapi",
+        "creator": "",
+        "top_holders": [],
+        "top10_pct": 0,
+        "top1_pct": 0,
+        "holder_count": holders if holders is not None else 0,
+        "holder_note": f"fomo {board} rank {t.get('rank') or '-'}",
+        "fomo_board": board,
+        "fomo_rank": t.get("rank"),
+        "source": "fomo",
+        "fomo_url": f"https://fomo.family/tokens/{chain}/{addr}" if addr else "",
+    }
+
+
+def fetch_fomo_boards(limit: int = 25) -> List[Dict]:
+    """Token boards: trending / most-held / graduated dari FOMO social traders."""
+    now = time.time()
+    if FOMO_CACHE["rows"] and now - FOMO_CACHE["ts"] < FOMO_TTL:
+        return list(FOMO_CACHE["rows"])[:limit]
+    if not FOMO_API_KEY:
+        return []
+    rows = []
+    seen = set()
+    for board in ("trending", "graduated", "most-held"):
+        data = fomo_get(f"/v2/leaderboard/tokens/{board}", {"limit": min(limit, 40)})
+        if not isinstance(data, dict) or data.get("error"):
+            print("fomo board", board, data.get("error") if isinstance(data, dict) else data)
+            continue
+        if data.get("available") is False:
+            continue
+        for t in data.get("tokens") or []:
+            if not isinstance(t, dict):
+                continue
+            row = fomo_token_to_row(t, board)
+            key = (row.get("token_address") or "").lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    FOMO_CACHE["rows"] = rows
+    FOMO_CACHE["ts"] = now
+    return rows[:limit]
+
+
+def fetch_fomo_smart_holders(address: str, limit: int = 20) -> Dict:
+    """Smart-money holders FOMO yang pegang token ini."""
+    if not address or not FOMO_API_KEY:
+        return {}
+    data = fomo_get(f"/token/{address}/holders", {"limit": limit})
+    if not isinstance(data, dict) or data.get("error"):
+        return data if isinstance(data, dict) else {}
+    if data.get("available") is False:
+        return {"available": False, "holders": []}
+    holders = data.get("holders") or data.get("data") or []
+    if not isinstance(holders, list):
+        holders = []
+    return {"available": True, "holders": holders, "count": len(holders)}
+
+
+def apply_fomo_enrich(row: Dict) -> Dict:
+    addr = row.get("token_address") or ""
+    if not addr or not FOMO_API_KEY:
+        return row
+    sm = fetch_fomo_smart_holders(addr, 15)
+    if not sm or sm.get("error") or sm.get("available") is False:
+        return row
+    holders = sm.get("holders") or []
+    row["fomo_smart_holders"] = holders[:10]
+    row["fomo_smart_count"] = len(holders)
+    if holders:
+        names = []
+        for h in holders[:5]:
+            handle = h.get("handle") or h.get("user") or "?"
+            val = h.get("valueUsd") or h.get("amount") or ""
+            names.append(f"@{handle}")
+        row["holder_note"] = (
+            (row.get("holder_note") or "") + f" · FOMO smart: {', '.join(names)}"
+        ).strip(" ·")
+        flags = list(row.get("flags") or [])
+        if "FOMO_SMART_HOLDERS" not in flags:
+            flags.append("FOMO_SMART_HOLDERS")
+        row["flags"] = flags
+    return row
+
+
 def fetch_pairs() -> List[Dict]:
     now = time.time()
     if CACHE["data"] and now - CACHE["ts"] < CACHE_TTL:
@@ -1401,6 +1573,21 @@ def scan_yodao(limit: int = 20, stage: str = Query("all", enum=["all", "new", "c
         return []
 
 
+@app.get("/scan/fomo")
+def scan_fomo(limit: int = 20, board: str = Query("all", enum=["all", "trending", "graduated", "most-held"])):
+    """Token board dari FOMO social traders (fomoapi.io). Butuh FOMO_API_KEY."""
+    if not FOMO_API_KEY:
+        return {"error": "Set FOMO_API_KEY di Render. Gratis: https://fomoapi.io/dashboard"}
+    try:
+        rows = fetch_fomo_boards(limit=40)
+        if board != "all":
+            rows = [r for r in rows if r.get("fomo_board") == board]
+        return rows[:limit]
+    except Exception as e:
+        print("FOMO SCAN ERROR:", e)
+        return {"error": str(e)}
+
+
 @app.get("/scan/quality")
 def scan_quality(limit: int = 20):
     """Token dengan tape sehat, window POSSIBLE, keamanan hijau."""
@@ -1646,6 +1833,10 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
                 apply_yodao_enrich(row)
             except Exception as ye:
                 print("yodao enrich ca error:", ye)
+            try:
+                apply_fomo_enrich(row)
+            except Exception as fe:
+                print("fomo enrich ca error:", fe)
         return rows
     except Exception as e:
         print("CA SCAN ERROR:", e)
@@ -2038,10 +2229,50 @@ def donate_text() -> str:
 def menu_buttons() -> dict:
     return {"inline_keyboard": [
         [{"text": "🔍 Scan kandidat", "callback_data": "scan"}],
-        [{"text": "🚀 Scan Yodao Pump", "callback_data": "yodao"}],
+        [{"text": "🚀 Yodao Pump", "callback_data": "yodao"}, {"text": "🔥 FOMO Board", "callback_data": "fomo"}],
         [{"text": "📊 Statistik signal", "callback_data": "stats"}],
         [{"text": "☕ Donasi USDT", "callback_data": "donasi"}],
     ]}
+
+
+def send_fomo_candidates(chat_id: str) -> None:
+    if not FOMO_API_KEY:
+        send_telegram(
+            "🔥 <b>FOMO API</b>\nSet env <code>FOMO_API_KEY</code> di Render.\n"
+            "Ambil gratis: https://fomoapi.io/dashboard",
+            buttons=menu_buttons(),
+            chat_id=chat_id,
+        )
+        return
+    send_telegram("🔥 Scan FOMO board...", chat_id=chat_id)
+    try:
+        rows = fetch_fomo_boards(limit=10)
+    except Exception as e:
+        send_telegram(f"FOMO gagal: {e}", buttons=menu_buttons(), chat_id=chat_id)
+        return
+    if not rows:
+        send_telegram(
+            "🔥 Board kosong / key credits habis / API error.",
+            buttons=menu_buttons(),
+            chat_id=chat_id,
+        )
+        return
+    lines = [f"🔥 <b>FOMO Board</b> · {len(rows)} token", "Sumber: api.fomoapi.io · smart money social"]
+    kb = []
+    for i, row in enumerate(rows, 1):
+        addr = row.get("token_address") or ""
+        chg = float(row.get("price_change_24h") or 0)
+        lines.append("")
+        lines.append(
+            f"<b>{i}. ${row.get('symbol')}</b> · {row.get('fomo_board')} #{row.get('fomo_rank') or '-'} · "
+            f"{str(row.get('chain') or '').upper()}"
+        )
+        lines.append(f"MCap {_usd(row.get('market_cap'))} · 24h {chg:+.1f}%")
+        lines.append(f"<code>{addr}</code>")
+        if addr:
+            kb.append([{"text": f"🔬 Analisa ${row.get('symbol') or i}", "callback_data": "ca:" + addr[:60]}])
+    kb.append([{"text": "🔥 FOMO lagi", "callback_data": "fomo"}])
+    send_telegram("\n".join(lines), buttons={"inline_keyboard": kb}, chat_id=chat_id)
 
 
 def send_yodao_candidates(chat_id: str) -> None:
@@ -2336,6 +2567,15 @@ def analisa_id(row: Dict) -> str:
         f"🔒 LP {row.get('lp_status') or '-'} · 🔥 {row.get('burn_status') or '-'}",
     ]
     lines.extend(h_lines)
+    sm = row.get("fomo_smart_holders") or []
+    if sm:
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append(f"🔥 <b>FOMO smart holders</b> ({row.get('fomo_smart_count') or len(sm)})")
+        for h in sm[:5]:
+            handle = h.get("handle") or "?"
+            val = h.get("valueUsd")
+            val_s = f" · ${_usd(val).lstrip('$')}" if val not in (None, "") else ""
+            lines.append(f"• @{handle}{val_s}")
     lines.append("━━━━━━━━━━━━━━")
     lines.append("CA")
     lines.append(f"<code>{row.get('token_address') or '-'}</code>")
@@ -2389,6 +2629,8 @@ def process_tg_update(upd: Dict) -> None:
             send_scan_candidates(str(chat))
         elif data == "yodao":
             send_yodao_candidates(str(chat))
+        elif data == "fomo":
+            send_fomo_candidates(str(chat))
         elif data == "stats":
             stats = refresh_signal_stats()
             send_telegram(format_stats_msg(stats), buttons=menu_buttons(), chat_id=str(chat))
@@ -2412,6 +2654,9 @@ def process_tg_update(upd: Dict) -> None:
         return
     if text.startswith("/yodao") or text.lower() in ("yodao", "pump"):
         send_yodao_candidates(str(chat))
+        return
+    if text.startswith("/fomo") or text.lower() == "fomo":
+        send_fomo_candidates(str(chat))
         return
     if text.startswith("/stats") or text.lower() in ("stats", "statistik", "winrate"):
         stats = refresh_signal_stats()
