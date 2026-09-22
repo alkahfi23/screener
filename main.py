@@ -281,6 +281,263 @@ def fetch_pairs_for_tokens(addresses: List[str]) -> List[Dict]:
     return pairs
 
 
+# ---------- Yodao Pump.fun API (https://dev.yodao.io) ----------
+YODAO_API = os.getenv("YODAO_API_BASE", "https://api2.yodao.io").rstrip("/")
+YODAO_CACHE = {"ts": 0, "rows": []}
+YODAO_TTL = 8
+
+
+def fetch_yodao_meme(filters: Optional[Dict] = None) -> Dict:
+    """POST /api/v2/meme — new / completing / graduated pump.fun pools."""
+    body = filters or {
+        "type": "all",
+        "newPools": {
+            "holders": {"min": 12},
+            "volumeUsd": {"min": 1500},
+            "devHoldingPct": {"max": 18},
+            "top10HoldingPct": {"max": 40},
+            "snipersHoldingPct": {"max": 25},
+            "bundlersHoldingPct": {"max": 20},
+        },
+        "completing": {
+            "holders": {"min": 20},
+            "volumeUsd": {"min": 3000},
+            "devHoldingPct": {"max": 15},
+        },
+        "graduated": {
+            "holders": {"min": 30},
+            "volumeUsd": {"min": 5000},
+            "mCapUsd": {"max": 900_000},
+        },
+    }
+    try:
+        r = SESSION.post(
+            f"{YODAO_API}/api/v2/meme",
+            json=body,
+            headers={"Content-Type": "application/json", "x-socket-id": "hybrid-gem-scanner"},
+            timeout=18,
+        )
+        if not r.ok:
+            print("yodao meme status:", r.status_code, r.text[:200])
+            return {}
+        data = r.json()
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("yodao meme error:", e)
+        return {}
+
+
+def fetch_yodao_market(mint: str) -> Dict:
+    """GET /api/v2/search/tokens/:mint/market-data"""
+    if not mint:
+        return {}
+    try:
+        r = SESSION.get(
+            f"{YODAO_API}/api/v2/search/tokens/{mint}/market-data",
+            timeout=12,
+        )
+        if not r.ok:
+            return {}
+        data = r.json()
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("yodao market error:", e)
+        return {}
+
+
+def yodao_pool_to_row(p: Dict, stage: str = "new") -> Dict:
+    """Map Yodao pool → internal row shape (compatible with filters / Telegram)."""
+    mint = p.get("mint") or ""
+    liq = float(p.get("liqudity") or p.get("liquidity") or 0)
+    mcap = float(p.get("market_cap") or 0)
+    vol = float(p.get("vol_24h") or 0)
+    buys = float(p.get("tx_24h_buy") or 0)
+    sells = float(p.get("tx_24h_sell") or 0)
+    top10 = float(p.get("top_10_percent") or 0)
+    holders = int(p.get("holders") or 0)
+    creator_pct = float(p.get("creator_holding") or p.get("creator_holding_pct") or 0)
+    snipers = float(p.get("snipers_holding") or 0)
+    insiders = float(p.get("insiders_holding") or 0)
+    bundle = float(p.get("bundle_holding") or 0)
+    fresh = float(p.get("fresh_wallets_holding") or 0)
+    pro = float(p.get("pro_traders_holding") or p.get("pro_traders") or 0)
+    pct_done = float(p.get("pct_completion") or 0)
+    ts = p.get("timestamp") or ""
+    age_h = None
+    try:
+        # timestamp often "YYYY-MM-DD HH:MM:SS"
+        from datetime import datetime
+        dt = datetime.strptime(str(ts)[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")
+        age_h = max(0.0, (time.time() - dt.timestamp()) / 3600)
+    except Exception:
+        age_h = None
+    socials = []
+    if p.get("twitter"):
+        socials.append({"type": "twitter", "url": p["twitter"]})
+    if p.get("telegram"):
+        socials.append({"type": "telegram", "url": p["telegram"]})
+    websites = [p["website"]] if p.get("website") else []
+    flags = []
+    if creator_pct >= 10:
+        flags.append("DEV_HOLDING_HIGH")
+    if snipers >= 15:
+        flags.append("SNIPERS_HIGH")
+    if insiders >= 10:
+        flags.append("INSIDERS_HIGH")
+    if bundle >= 15:
+        flags.append("BUNDLE_HIGH")
+    if fresh >= 20:
+        flags.append("FRESH_WALLETS_HIGH")
+    if top10 >= 40:
+        flags.append("CONCENTRATED_HOLDERS")
+    pressure = "BUY PRESSURE" if buys > sells * 1.15 else ("SELL PRESSURE" if sells > buys * 1.15 else "NEUTRAL")
+    score = 40
+    if holders >= 50:
+        score += 10
+    if 15_000 <= mcap <= 400_000:
+        score += 15
+    if liq >= 8_000:
+        score += 10
+    if creator_pct < 5:
+        score += 8
+    if top10 < 25:
+        score += 8
+    if stage == "completing":
+        score += 5
+    risk = "HIGH" if (creator_pct >= 20 or snipers >= 30 or insiders >= 20) else "LOW"
+    if risk == "HIGH":
+        score = min(score, 55)
+    return {
+        "symbol": p.get("symbol") or "?",
+        "name": p.get("name") or "",
+        "token_address": mint,
+        "chain": "solana",
+        "sector": "SOLANA",
+        "dex": "pumpfun" if stage != "graduated" else "pumpswap",
+        "score": min(score, 100),
+        "confidence": min(50 + (10 if holders > 40 else 0) + (10 if vol > 10_000 else 0), 95),
+        "pressure": pressure,
+        "verdict": "YODAO " + stage.upper(),
+        "whale": "WHALE BUYING" if pro >= 5 or buys > sells * 1.3 else "-",
+        "flow": "ACCUMULATION" if buys > sells else ("DISTRIBUTION" if sells > buys else "NEUTRAL"),
+        "liquidity_usd": liq,
+        "market_cap": mcap,
+        "volume_24h": vol,
+        "price_change_24h": 0,
+        "price_usd": None,
+        "age_hours": round(age_h, 2) if age_h is not None else None,
+        "pair_address": p.get("pool") or "",
+        "url": f"https://dexscreener.com/solana/{mint}" if mint else "",
+        "upside": "HIGH ROOM" if mcap and mcap < 250_000 else "SPECULATIVE",
+        "upside_note": f"yodao {stage} · complete {pct_done:.0f}%",
+        "icon": p.get("image") or "",
+        "socials": socials,
+        "websites": websites,
+        "honeypot": False,
+        "risk": risk,
+        "flags": flags,
+        "buy_tax": 0,
+        "sell_tax": 0,
+        "sec_provider": "yodao",
+        "creator": p.get("creator") or "",
+        "top_holders": [],
+        "top10_pct": top10,
+        "top1_pct": max(creator_pct, top10 / 4 if top10 else 0),
+        "holder_count": holders,
+        "holder_note": (
+            f"yodao · dev {creator_pct:.1f}% · sniper {snipers:.1f}% · "
+            f"insider {insiders:.1f}% · bundle {bundle:.1f}% · fresh {fresh:.1f}%"
+        ),
+        "tx_buys_h1": buys,
+        "tx_sells_h1": sells,
+        "tx_buys_m5": 0,
+        "tx_sells_m5": 0,
+        "yodao_stage": stage,
+        "yodao_pct_completion": pct_done,
+        "yodao_dev_holding": creator_pct,
+        "yodao_snipers": snipers,
+        "yodao_insiders": insiders,
+        "yodao_bundle": bundle,
+        "yodao_fresh": fresh,
+        "yodao_pro_traders": pro,
+        "source": "yodao",
+    }
+
+
+def fetch_yodao_rows(force: bool = False) -> List[Dict]:
+    now = time.time()
+    if not force and YODAO_CACHE["rows"] and now - YODAO_CACHE["ts"] < YODAO_TTL:
+        return list(YODAO_CACHE["rows"])
+    data = fetch_yodao_meme()
+    rows = []
+    for stage in ("new", "completing", "graduated"):
+        for p in data.get(stage) or []:
+            if isinstance(p, dict) and p.get("mint"):
+                rows.append(yodao_pool_to_row(p, stage))
+    YODAO_CACHE["rows"] = rows
+    YODAO_CACHE["ts"] = now
+    return rows
+
+
+def apply_yodao_enrich(row: Dict) -> Dict:
+    """Isi holder/dev/sniper dari Yodao market-data kalau mint Solana."""
+    chain = str(row.get("chain") or "").lower()
+    mint = row.get("token_address") or ""
+    if chain not in ("solana",) or not mint:
+        return row
+    md = fetch_yodao_market(mint)
+    if not md:
+        return row
+    top10 = float(md.get("top_10_percent") or row.get("top10_pct") or 0)
+    holders = int(md.get("holders") or row.get("holder_count") or 0)
+    dev = float(md.get("creator_holding_pct") or md.get("creator_holding") or 0)
+    snipers = float(md.get("snipers_holding") or 0)
+    insiders = float(md.get("insiders_holding") or 0)
+    bundle = float(md.get("bundle_holding") or 0)
+    fresh = float(md.get("fresh_wallet_holding") or md.get("fresh_wallets_holding") or 0)
+    liq = float(md.get("liquidity") or row.get("liquidity_usd") or 0)
+    mcap = float(md.get("market_cap") or row.get("market_cap") or 0)
+    vol = float(md.get("vol_24h") or row.get("volume_24h") or 0)
+    px = md.get("token_price_usd")
+    row["top10_pct"] = top10
+    row["top1_pct"] = max(float(row.get("top1_pct") or 0), dev)
+    row["holder_count"] = holders or row.get("holder_count")
+    row["liquidity_usd"] = liq or row.get("liquidity_usd")
+    row["market_cap"] = mcap or row.get("market_cap")
+    row["volume_24h"] = vol or row.get("volume_24h")
+    if px:
+        row["price_usd"] = px
+    row["yodao_dev_holding"] = dev
+    row["yodao_snipers"] = snipers
+    row["yodao_insiders"] = insiders
+    row["yodao_bundle"] = bundle
+    row["yodao_fresh"] = fresh
+    row["yodao_pct_completion"] = float(md.get("pct_completion") or row.get("yodao_pct_completion") or 0)
+    note = (
+        f"yodao · dev {dev:.1f}% · sniper {snipers:.1f}% · "
+        f"insider {insiders:.1f}% · bundle {bundle:.1f}% · fresh {fresh:.1f}%"
+    )
+    row["holder_note"] = note
+    flags = list(row.get("flags") or [])
+    if dev >= 10 and "DEV_HOLDING_HIGH" not in flags:
+        flags.append("DEV_HOLDING_HIGH")
+    if snipers >= 15 and "SNIPERS_HIGH" not in flags:
+        flags.append("SNIPERS_HIGH")
+    if insiders >= 10 and "INSIDERS_HIGH" not in flags:
+        flags.append("INSIDERS_HIGH")
+    if top10 >= 40 and "CONCENTRATED_HOLDERS" not in flags:
+        flags.append("CONCENTRATED_HOLDERS")
+    if dev >= 10:
+        row["top1_pct"] = max(float(row.get("top1_pct") or 0), dev)
+    row["flags"] = flags
+    if not row.get("creator") and md.get("creator"):
+        row["creator"] = md["creator"]
+    if not row.get("icon") and md.get("image"):
+        row["icon"] = md["image"]
+    row["sec_provider"] = (row.get("sec_provider") or "") + "+yodao"
+    return row
+
+
 def fetch_pairs() -> List[Dict]:
     now = time.time()
     if CACHE["data"] and now - CACHE["ts"] < CACHE_TTL:
@@ -1104,12 +1361,40 @@ def scan_top(
             results.append(enrich(p, False))
         results.sort(key=lambda x: x["confidence"], reverse=True)
         secured = attach_security(results[:40])
-        picked = [r for r in secured if is_early_setup(r, mode)]
+        # Yodao pump.fun early pools (Solana) — sumber tambahan
+        try:
+            seen_mints = {(r.get("token_address") or "").lower() for r in secured}
+            for yr in fetch_yodao_rows()[:30]:
+                mint = (yr.get("token_address") or "").lower()
+                if not mint or mint in seen_mints:
+                    continue
+                if is_early_setup(yr, mode) or (mode == "aggressive" and yr.get("risk") != "HIGH"):
+                    secured.append(yr)
+                    seen_mints.add(mint)
+        except Exception as ye:
+            print("yodao merge error:", ye)
+        picked = [r for r in secured if is_early_setup(r, mode) or (
+            mode == "aggressive" and r.get("source") == "yodao" and r.get("risk") != "HIGH"
+        )]
         picked.sort(key=lambda x: (x.get("confidence") or 0, x.get("score") or 0), reverse=True)
         remember_tokens(picked[:limit])
         return picked[:limit]
     except Exception as e:
         print("DISCOVERY ERROR:", e)
+        return []
+
+
+@app.get("/scan/yodao")
+def scan_yodao(limit: int = 20, stage: str = Query("all", enum=["all", "new", "completing", "graduated"])):
+    """Kandidat Pump.fun dari Yodao API (dev.yodao.io)."""
+    try:
+        rows = fetch_yodao_rows(force=True)
+        if stage != "all":
+            rows = [r for r in rows if r.get("yodao_stage") == stage]
+        rows.sort(key=lambda x: (x.get("score") or 0, x.get("volume_24h") or 0), reverse=True)
+        return rows[:limit]
+    except Exception as e:
+        print("YODAO SCAN ERROR:", e)
         return []
 
 
@@ -1354,6 +1639,10 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
             row["buyback_status"] = mech["buyback_status"]
             row["mechanics_note"] = mech["note"]
             row["ca_report"] = ca_analysis(row)
+            try:
+                apply_yodao_enrich(row)
+            except Exception as ye:
+                print("yodao enrich ca error:", ye)
         return rows
     except Exception as e:
         print("CA SCAN ERROR:", e)
@@ -1746,9 +2035,49 @@ def donate_text() -> str:
 def menu_buttons() -> dict:
     return {"inline_keyboard": [
         [{"text": "🔍 Scan kandidat", "callback_data": "scan"}],
+        [{"text": "🚀 Scan Yodao Pump", "callback_data": "yodao"}],
         [{"text": "📊 Statistik signal", "callback_data": "stats"}],
         [{"text": "☕ Donasi USDT", "callback_data": "donasi"}],
     ]}
+
+
+def send_yodao_candidates(chat_id: str) -> None:
+    send_telegram("🚀 Scan Yodao Pump.fun...", chat_id=chat_id)
+    try:
+        rows = scan_yodao(limit=8, stage="all")
+    except Exception as e:
+        send_telegram(f"Yodao gagal: {e}", buttons=menu_buttons(), chat_id=chat_id)
+        return
+    if not rows:
+        send_telegram(
+            "🚀 <b>Yodao kosong</b>\nTidak ada pool lolos filter, atau API tidak merespon.",
+            buttons=menu_buttons(),
+            chat_id=chat_id,
+        )
+        return
+    lines = [f"🚀 <b>Yodao Pump</b> · {len(rows)} kandidat", "Sumber: api2.yodao.io · Solana only"]
+    kb = []
+    for i, row in enumerate(rows, 1):
+        addr = row.get("token_address") or ""
+        stage = row.get("yodao_stage") or "-"
+        lines.append("")
+        lines.append(
+            f"<b>{i}. ${row.get('symbol')}</b> · {stage} · complete {row.get('yodao_pct_completion') or 0:.0f}%"
+        )
+        lines.append(
+            f"MCap {_usd(row.get('market_cap'))} · Liq {_usd(row.get('liquidity_usd'))} · "
+            f"n={row.get('holder_count') or '-'}"
+        )
+        lines.append(
+            f"Dev {row.get('yodao_dev_holding') or 0:.0f}% · Sniper {row.get('yodao_snipers') or 0:.0f}% · "
+            f"Top10 {row.get('top10_pct') or 0:.0f}%"
+        )
+        lines.append(f"<code>{addr}</code>")
+        if addr:
+            kb.append([{"text": f"🔬 Analisa ${row.get('symbol') or i}", "callback_data": "ca:" + addr[:60]}])
+    kb.append([{"text": "🚀 Yodao lagi", "callback_data": "yodao"}])
+    kb.append([{"text": "🔍 Scan Dex", "callback_data": "scan"}])
+    send_telegram("\n".join(lines), buttons={"inline_keyboard": kb}, chat_id=chat_id)
 
 
 def donate_buttons() -> dict:
@@ -2055,6 +2384,8 @@ def process_tg_update(upd: Dict) -> None:
             send_telegram(donate_text(), buttons=donate_buttons(), chat_id=str(chat))
         elif data == "scan":
             send_scan_candidates(str(chat))
+        elif data == "yodao":
+            send_yodao_candidates(str(chat))
         elif data == "stats":
             stats = refresh_signal_stats()
             send_telegram(format_stats_msg(stats), buttons=menu_buttons(), chat_id=str(chat))
@@ -2075,6 +2406,9 @@ def process_tg_update(upd: Dict) -> None:
         return
     if text.startswith("/scan") or text.lower() == "scan":
         send_scan_candidates(str(chat))
+        return
+    if text.startswith("/yodao") or text.lower() in ("yodao", "pump"):
+        send_yodao_candidates(str(chat))
         return
     if text.startswith("/stats") or text.lower() in ("stats", "statistik", "winrate"):
         stats = refresh_signal_stats()
