@@ -516,11 +516,19 @@ def apply_yodao_enrich(row: Dict) -> Dict:
     row["yodao_bundle"] = bundle
     row["yodao_fresh"] = fresh
     row["yodao_pct_completion"] = float(md.get("pct_completion") or row.get("yodao_pct_completion") or 0)
+    row["yodao_tx_buy"] = float(md.get("tx_24h_buy") or 0)
+    row["yodao_tx_sell"] = float(md.get("tx_24h_sell") or 0)
+    row["yodao_pro"] = float(md.get("pro_traders") or md.get("pro_traders_holding") or 0)
+    row["yodao_ok"] = True
     note = (
         f"yodao · dev {dev:.1f}% · sniper {snipers:.1f}% · "
         f"insider {insiders:.1f}% · bundle {bundle:.1f}% · fresh {fresh:.1f}%"
     )
-    row["holder_note"] = note
+    prev_note = row.get("holder_note") or ""
+    if "yodao" not in prev_note:
+        row["holder_note"] = (prev_note + " · " + note).strip(" ·") if prev_note else note
+    else:
+        row["holder_note"] = note
     flags = list(row.get("flags") or [])
     if dev >= 10 and "DEV_HOLDING_HIGH" not in flags:
         flags.append("DEV_HOLDING_HIGH")
@@ -528,6 +536,10 @@ def apply_yodao_enrich(row: Dict) -> Dict:
         flags.append("SNIPERS_HIGH")
     if insiders >= 10 and "INSIDERS_HIGH" not in flags:
         flags.append("INSIDERS_HIGH")
+    if bundle >= 15 and "BUNDLE_HIGH" not in flags:
+        flags.append("BUNDLE_HIGH")
+    if fresh >= 25 and "FRESH_WALLETS_HIGH" not in flags:
+        flags.append("FRESH_WALLETS_HIGH")
     if top10 >= 40 and "CONCENTRATED_HOLDERS" not in flags:
         flags.append("CONCENTRATED_HOLDERS")
     if dev >= 10:
@@ -537,6 +549,12 @@ def apply_yodao_enrich(row: Dict) -> Dict:
         row["creator"] = md["creator"]
     if not row.get("icon") and md.get("image"):
         row["icon"] = md["image"]
+    if md.get("twitter") and not any(s.get("type") == "twitter" for s in (row.get("socials") or [])):
+        row.setdefault("socials", []).append({"type": "twitter", "url": md["twitter"]})
+    if md.get("telegram") and not any(s.get("type") == "telegram" for s in (row.get("socials") or [])):
+        row.setdefault("socials", []).append({"type": "telegram", "url": md["telegram"]})
+    if md.get("website") and md["website"] not in (row.get("websites") or []):
+        row.setdefault("websites", []).append(md["website"])
     row["sec_provider"] = (row.get("sec_provider") or "") + "+yodao"
     return row
 
@@ -690,18 +708,28 @@ def fetch_fomo_smart_holders(address: str, limit: int = 20) -> Dict:
 def apply_fomo_enrich(row: Dict) -> Dict:
     addr = row.get("token_address") or ""
     if not addr or not FOMO_API_KEY:
+        row["fomo_ok"] = False
         return row
     sm = fetch_fomo_smart_holders(addr, 15)
+    row["fomo_ok"] = bool(sm) and not sm.get("error")
     if not sm or sm.get("error") or sm.get("available") is False:
+        if isinstance(sm, dict) and sm.get("error"):
+            row["fomo_error"] = sm.get("error")
         return row
     holders = sm.get("holders") or []
     row["fomo_smart_holders"] = holders[:10]
     row["fomo_smart_count"] = len(holders)
+    total_val = 0.0
+    for h in holders:
+        try:
+            total_val += float(h.get("valueUsd") or 0)
+        except (TypeError, ValueError):
+            pass
+    row["fomo_smart_value_usd"] = round(total_val, 2)
     if holders:
         names = []
         for h in holders[:5]:
             handle = h.get("handle") or h.get("user") or "?"
-            val = h.get("valueUsd") or h.get("amount") or ""
             names.append(f"@{handle}")
         row["holder_note"] = (
             (row.get("holder_note") or "") + f" · FOMO smart: {', '.join(names)}"
@@ -709,7 +737,26 @@ def apply_fomo_enrich(row: Dict) -> Dict:
         flags = list(row.get("flags") or [])
         if "FOMO_SMART_HOLDERS" not in flags:
             flags.append("FOMO_SMART_HOLDERS")
+        if len(holders) >= 3 and "FOMO_CROWD_IN" not in flags:
+            flags.append("FOMO_CROWD_IN")
         row["flags"] = flags
+    # cek apakah token ada di board FOMO
+    try:
+        for board in ("trending", "graduated"):
+            data = fomo_get(f"/v2/leaderboard/tokens/{board}", {"limit": 40})
+            if not isinstance(data, dict) or data.get("error"):
+                continue
+            for t in data.get("tokens") or []:
+                tok = t.get("token") if isinstance(t.get("token"), dict) else {}
+                a = (tok.get("address") or t.get("address") or "").lower()
+                if a == addr.lower():
+                    row["fomo_board"] = board
+                    row["fomo_rank"] = t.get("rank")
+                    break
+            if row.get("fomo_board"):
+                break
+    except Exception as e:
+        print("fomo board check error:", e)
     return row
 
 
@@ -1799,22 +1846,69 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
             if want_addr in (base, quote, pair):
                 matched.append(p)
         pairs = matched
+        rows: List[Dict] = []
         if not pairs:
-            return {"error": "pair tidak ketemu di DexScreener", "address": addr}
-        # satu mint: kalau user tempel CA token, kunci ke base=CA
-        base_hits = [p for p in pairs if ((p.get("baseToken") or {}).get("address") or "").lower() == want_addr]
-        if base_hits:
-            pairs = base_hits
-        pair_hits = [p for p in pairs if (p.get("pairAddress") or "").lower() == want_addr]
-        if pair_hits:
-            pairs = pair_hits
-        best = group_best_by_token(pairs)
-        picked = list(best.values())
-        if len(picked) > 1:
-            picked = [sorted(picked, key=lambda p: num(p, "liquidity", "usd"), reverse=True)[0]]
-        rows = [enrich(p, False) for p in picked]
-        rows = attach_security(rows)
-        remember_tokens(rows)
+            # fallback Solana: Yodao market-data saja
+            md = fetch_yodao_market(addr)
+            if md and (md.get("mint") or md.get("symbol")):
+                stub = {
+                    "symbol": md.get("symbol") or "?",
+                    "name": md.get("name") or "",
+                    "token_address": md.get("mint") or addr,
+                    "chain": "solana",
+                    "sector": "SOLANA",
+                    "dex": "pumpfun",
+                    "score": 45,
+                    "confidence": 50,
+                    "pressure": "NEUTRAL",
+                    "verdict": "YODAO ONLY",
+                    "whale": "-",
+                    "flow": "NEUTRAL",
+                    "liquidity_usd": float(md.get("liquidity") or 0),
+                    "market_cap": float(md.get("market_cap") or 0),
+                    "volume_24h": float(md.get("vol_24h") or 0),
+                    "price_change_24h": 0,
+                    "price_usd": md.get("token_price_usd"),
+                    "age_hours": None,
+                    "pair_address": md.get("pool_amm") or md.get("pool") or "",
+                    "url": f"https://dexscreener.com/solana/{addr}",
+                    "upside": "SPECULATIVE",
+                    "upside_note": "hanya dari Yodao (Dex pair belum ketemu)",
+                    "icon": md.get("image") or "",
+                    "socials": [],
+                    "websites": [],
+                    "honeypot": False,
+                    "risk": "UNKNOWN",
+                    "flags": ["YODAO_ONLY"],
+                    "buy_tax": 0,
+                    "sell_tax": 0,
+                    "sec_provider": "yodao",
+                    "creator": md.get("creator") or "",
+                    "top_holders": [],
+                    "top10_pct": 0,
+                    "top1_pct": 0,
+                    "holder_count": int(md.get("holders") or 0),
+                    "holder_note": "",
+                    "source": "yodao",
+                }
+                rows = [stub]
+            else:
+                return {"error": "pair tidak ketemu di DexScreener / Yodao", "address": addr}
+        else:
+            # satu mint: kalau user tempel CA token, kunci ke base=CA
+            base_hits = [p for p in pairs if ((p.get("baseToken") or {}).get("address") or "").lower() == want_addr]
+            if base_hits:
+                pairs = base_hits
+            pair_hits = [p for p in pairs if (p.get("pairAddress") or "").lower() == want_addr]
+            if pair_hits:
+                pairs = pair_hits
+            best = group_best_by_token(pairs)
+            picked = list(best.values())
+            if len(picked) > 1:
+                picked = [sorted(picked, key=lambda p: num(p, "liquidity", "usd"), reverse=True)[0]]
+            rows = [enrich(p, False) for p in picked]
+            rows = attach_security(rows)
+            remember_tokens(rows)
         for row in rows:
             chain_l = str(row.get("chain") or "").lower()
             pair = row.get("pair_address") or ""
@@ -2567,15 +2661,74 @@ def analisa_id(row: Dict) -> str:
         f"🔒 LP {row.get('lp_status') or '-'} · 🔥 {row.get('burn_status') or '-'}",
     ]
     lines.extend(h_lines)
+    # ---- gabungan Yodao + FOMO ----
+    yodao_on = bool(row.get("yodao_ok"))
+    fomo_on = bool(row.get("fomo_smart_holders")) or bool(row.get("fomo_board"))
+    lines.append("━━━━━━━━━━━━━━")
+    lines.append("🧩 <b>SUMBER GABUNGAN</b>")
+    if yodao_on:
+        dev = float(row.get("yodao_dev_holding") or 0)
+        sn = float(row.get("yodao_snipers") or 0)
+        ins = float(row.get("yodao_insiders") or 0)
+        bun = float(row.get("yodao_bundle") or 0)
+        fr = float(row.get("yodao_fresh") or 0)
+        pc = float(row.get("yodao_pct_completion") or 0)
+        tb = float(row.get("yodao_tx_buy") or 0)
+        ts = float(row.get("yodao_tx_sell") or 0)
+        lines.append("🚀 <b>Yodao</b> (pump / on-chain early)")
+        lines.append(f"· Bonding {pc:.0f}% · buy/sell tx {tb:.0f}/{ts:.0f}")
+        lines.append(f"· Dev {dev:.1f}% · Sniper {sn:.1f}% · Insider {ins:.1f}%")
+        lines.append(f"· Bundle {bun:.1f}% · Fresh wallet {fr:.1f}%")
+        warns = []
+        if dev >= 10:
+            warns.append("dev tinggi")
+        if sn >= 15:
+            warns.append("sniper tinggi")
+        if ins >= 10:
+            warns.append("insider")
+        if bun >= 15:
+            warns.append("bundle")
+        if fr >= 25:
+            warns.append("fresh wallet")
+        if warns:
+            lines.append("· ⚠️ " + ", ".join(warns))
+        else:
+            lines.append("· ✅ distribusi early relatif bersih")
+    else:
+        lines.append("🚀 Yodao: tidak ada data (bukan Solana / API kosong)")
     sm = row.get("fomo_smart_holders") or []
-    if sm:
-        lines.append("━━━━━━━━━━━━━━")
-        lines.append(f"🔥 <b>FOMO smart holders</b> ({row.get('fomo_smart_count') or len(sm)})")
+    if sm or row.get("fomo_board"):
+        lines.append("🔥 <b>FOMO</b> (smart money sosial)")
+        if row.get("fomo_board"):
+            lines.append(f"· Board <b>{row.get('fomo_board')}</b> rank #{row.get('fomo_rank') or '-'}")
+        n = row.get("fomo_smart_count") or len(sm)
+        val = row.get("fomo_smart_value_usd")
+        lines.append(f"· Smart holders: <b>{n}</b>" + (f" · nilai ~{_usd(val)}" if val else ""))
         for h in sm[:5]:
             handle = h.get("handle") or "?"
-            val = h.get("valueUsd")
-            val_s = f" · ${_usd(val).lstrip('$')}" if val not in (None, "") else ""
-            lines.append(f"• @{handle}{val_s}")
+            v = h.get("valueUsd")
+            val_s = f" · {_usd(v)}" if v not in (None, "") else ""
+            lines.append(f"· @{handle}{val_s}")
+        if n >= 3:
+            lines.append("· ✅ ada crowd FOMO yang pegang")
+        elif n == 0:
+            lines.append("· ⚪ belum ada smart FOMO terdeteksi")
+    else:
+        if not FOMO_API_KEY:
+            lines.append("🔥 FOMO: set FOMO_API_KEY di Render")
+        else:
+            lines.append("🔥 FOMO: tidak ada smart holder / board")
+    # ringkas bias gabungan
+    bias = []
+    if yodao_on:
+        if float(row.get("yodao_snipers") or 0) < 15 and float(row.get("yodao_dev_holding") or 0) < 10:
+            bias.append("Yodao bersih")
+        else:
+            bias.append("Yodao berisiko")
+    if sm:
+        bias.append(f"FOMO {len(sm)} smart")
+    if bias:
+        lines.append(f"📎 Bias: {' · '.join(bias)}")
     lines.append("━━━━━━━━━━━━━━")
     lines.append("CA")
     lines.append(f"<code>{row.get('token_address') or '-'}</code>")
@@ -2584,7 +2737,7 @@ def analisa_id(row: Dict) -> str:
     if row.get("fomo_url"):
         lines.append(f'⚡️ <a href="{row["fomo_url"]}">Trade FOMO</a>')
     lines.append("")
-    lines.append("⚠️ Bukan jaminan untung. Size kecil atau skip.")
+    lines.append("⚠️ Gabungan Dex+Yodao+FOMO. Bukan jaminan untung.")
     return "\n".join(lines)
 
 
