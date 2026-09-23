@@ -1521,13 +1521,14 @@ def apply_cmc_mechanics(row: Dict) -> Dict:
         "items": len(sec.get("securityItems") or []),
     }
     row["cmc_ok"] = parsed.get("cmc_ok")
-    # CMC override kalau lebih informatif dari UNKNOWN
-    if parsed.get("lp_status") and parsed["lp_status"] != "LP UNKNOWN":
-        row["lp_status"] = parsed["lp_status"]
-    if parsed.get("burn_status") and parsed["burn_status"] not in ("BURN UNKNOWN",):
-        row["burn_status"] = parsed["burn_status"]
-    if parsed.get("buyback_status") and parsed["buyback_status"] not in ("BUYBACK UNKNOWN",):
-        row["buyback_status"] = parsed["buyback_status"]
+    # CMC hanya fallback kalau GMGN belum isi
+    if not row.get("gmgn_ok"):
+        if parsed.get("lp_status") and parsed["lp_status"] != "LP UNKNOWN":
+            row["lp_status"] = parsed["lp_status"]
+        if parsed.get("burn_status") and parsed["burn_status"] not in ("BURN UNKNOWN",):
+            row["burn_status"] = parsed["burn_status"]
+        if parsed.get("buyback_status") and parsed["buyback_status"] not in ("BUYBACK UNKNOWN",):
+            row["buyback_status"] = parsed["buyback_status"]
     row["mechanics_note"] = (row.get("mechanics_note") or "") + " | " + parsed.get("note", "")
     row["mechanics_note"] = row["mechanics_note"].strip(" |")
     # honeypot hint dari CMC
@@ -1542,6 +1543,217 @@ def apply_cmc_mechanics(row: Dict) -> Dict:
         row["honeypot"] = True
         row["risk"] = "HONEYPOT"
     return row
+
+
+
+# ---------- GMGN OpenAPI (burn / LP / dev rug) https://openapi.gmgn.ai ----------
+GMGN_API_KEY = os.getenv("GMGN_API_KEY", "gmgn_basesolbscethmonadtron").strip()
+GMGN_HOST = os.getenv("GMGN_API_BASE", "https://openapi.gmgn.ai").rstrip("/")
+GMGN_CHAIN = {
+    "solana": "sol",
+    "sol": "sol",
+    "ethereum": "eth",
+    "eth": "eth",
+    "bsc": "bsc",
+    "bnb": "bsc",
+    "base": "base",
+}
+
+
+def gmgn_get(path: str, params: Dict) -> Dict:
+    if not GMGN_API_KEY:
+        return {"error": "GMGN_API_KEY kosong"}
+    try:
+        import uuid
+        q = dict(params or {})
+        q["timestamp"] = int(time.time())
+        q["client_id"] = str(uuid.uuid4())
+        r = SESSION.get(
+            f"{GMGN_HOST}{path}",
+            params=q,
+            headers={"X-APIKEY": GMGN_API_KEY, "Accept": "application/json"},
+            timeout=15,
+        )
+        if not r.ok:
+            return {"error": f"HTTP {r.status_code}", "body": r.text[:180]}
+        data = r.json()
+        if isinstance(data, dict) and data.get("code") not in (0, None, "0"):
+            return {"error": data.get("message") or data.get("reason") or "gmgn error", "raw": data}
+        if isinstance(data, dict) and "data" in data:
+            return data.get("data") or {}
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("gmgn_get error:", e)
+        return {"error": str(e)}
+
+
+def apply_gmgn_enrich(row: Dict) -> Dict:
+    """Burn / LP / token dev dari GMGN. Dev serial/rug → avoid."""
+    chain = str(row.get("chain") or "").lower()
+    addr = (row.get("token_address") or "").strip()
+    gchain = GMGN_CHAIN.get(chain)
+    if not addr or not gchain:
+        return row
+    sec = gmgn_get("/v1/token/security", {"chain": gchain, "address": addr})
+    info = gmgn_get("/v1/token/info", {"chain": gchain, "address": addr})
+    if isinstance(sec, dict) and sec.get("error") and isinstance(info, dict) and info.get("error"):
+        row["gmgn_error"] = sec.get("error") or info.get("error")
+        return row
+    if not isinstance(sec, dict):
+        sec = {}
+    if not isinstance(info, dict):
+        info = {}
+    row["gmgn_ok"] = True
+    flags = list(row.get("flags") or [])
+
+    burn_status = str(sec.get("burn_status") or "").lower()
+    try:
+        burn_ratio = float(sec.get("burn_ratio") or 0)
+    except (TypeError, ValueError):
+        burn_ratio = 0.0
+    lock = sec.get("lock_summary") if isinstance(sec.get("lock_summary"), dict) else {}
+    is_locked = bool(lock.get("is_locked"))
+    try:
+        lock_pct = float(lock.get("lock_percent") or 0)
+    except (TypeError, ValueError):
+        lock_pct = 0.0
+    lock_detail = lock.get("lock_detail") or []
+    blackhole = any(isinstance(x, dict) and x.get("is_blackhole") for x in lock_detail)
+    if burn_status in ("burn", "burned", "blackhole") or burn_ratio >= 0.9 or blackhole:
+        row["burn_status"] = f"LP/TOKEN BURN (GMGN {burn_ratio:.0%})" if burn_ratio else "LP/TOKEN BURN (GMGN)"
+        row["lp_status"] = "LP BURN / LOCK"
+    elif is_locked or lock_pct >= 0.5:
+        row["lp_status"] = f"LP LOCKED (GMGN {lock_pct:.0%})" if lock_pct else "LP LOCKED (GMGN)"
+        if row.get("burn_status") in (None, "", "BURN UNKNOWN"):
+            row["burn_status"] = "NO BURN · LP LOCKED"
+    else:
+        if row.get("lp_status") in (None, "", "LP UNKNOWN"):
+            row["lp_status"] = "LP UNLOCKED (GMGN)"
+        if row.get("burn_status") in (None, "", "BURN UNKNOWN"):
+            row["burn_status"] = "NO BURN (GMGN)" if burn_status in ("", "none", "unburn") else f"BURN {burn_status or 'UNKNOWN'}"
+
+    fee = info.get("fee_distribution") or {}
+    fee_blob = json.dumps(fee).lower() if fee else ""
+    if any(k in fee_blob for k in ("buyback", "burn", "treasury")):
+        row["buyback_status"] = "BUYBACK/FEE ROUTE (GMGN)"
+    elif row.get("buyback_status") in (None, "", "BUYBACK UNKNOWN"):
+        row["buyback_status"] = "BUYBACK UNKNOWN (GMGN)"
+
+    honeypot = sec.get("is_honeypot") if sec.get("is_honeypot") is not None else sec.get("honeypot")
+    if honeypot in (True, 1, "1", "yes", "true"):
+        row["honeypot"] = True
+        row["risk"] = "HONEYPOT"
+        if "HONEYPOT" not in flags:
+            flags.append("HONEYPOT")
+    if sec.get("renounced_mint") is False:
+        flags.append("MINT_NOT_RENOUNCED")
+    if sec.get("renounced_freeze_account") is False:
+        flags.append("FREEZE_NOT_RENOUNCED")
+    try:
+        top10 = float(sec.get("top_10_holder_rate") or 0)
+        if 0 < top10 <= 1:
+            top10 *= 100
+        if top10 > 0:
+            row["top10_pct"] = round(top10, 2)
+    except (TypeError, ValueError):
+        pass
+    try:
+        bt = float(sec.get("buy_tax") or 0)
+        st = float(sec.get("sell_tax") or 0)
+        if bt <= 1:
+            bt *= 100
+        if st <= 1:
+            st *= 100
+        if bt or st:
+            row["buy_tax"] = round(bt, 2)
+            row["sell_tax"] = round(st, 2)
+    except (TypeError, ValueError):
+        pass
+
+    dev = info.get("dev") if isinstance(info.get("dev"), dict) else {}
+    stat = info.get("stat") if isinstance(info.get("stat"), dict) else {}
+    creator = dev.get("creator_address") or row.get("creator") or ""
+    if creator:
+        row["creator"] = creator
+    creator_status = str(dev.get("creator_token_status") or "").lower()
+    row["gmgn_creator_status"] = creator_status
+    row["gmgn_creator"] = creator
+    try:
+        created_count = int(stat.get("creator_created_count") or dev.get("creator_open_count") or 0)
+    except (TypeError, ValueError):
+        created_count = 0
+    try:
+        creator_hold = float(stat.get("creator_hold_rate") or 0)
+        if creator_hold <= 1:
+            creator_hold *= 100
+    except (TypeError, ValueError):
+        creator_hold = 0.0
+    row["gmgn_creator_hold_pct"] = round(creator_hold, 2)
+    row["gmgn_creator_created_count"] = created_count
+    ath = dev.get("ath_token_info") if isinstance(dev.get("ath_token_info"), dict) else {}
+    try:
+        ath_mc = float(ath.get("ath_mc") or 0) if ath else 0
+    except (TypeError, ValueError):
+        ath_mc = 0
+    row["gmgn_dev_ath_mc"] = ath_mc
+    row["gmgn_dev_ath_symbol"] = ath.get("symbol") or ""
+
+    avoid = False
+    avoid_reasons = []
+    if created_count >= 8:
+        avoid = True
+        avoid_reasons.append(f"dev buat {created_count} token (serial)")
+        flags.append("DEV_SERIAL_DEPLOYER")
+    if creator_status == "creator_hold" and creator_hold >= 8:
+        avoid = True
+        avoid_reasons.append(f"dev masih hold {creator_hold:.1f}%")
+        flags.append("DEV_STILL_HOLDING")
+    if creator_status == "creator_hold" and created_count >= 3:
+        avoid = True
+        avoid_reasons.append("dev hold + multi token")
+        flags.append("DEV_HOLD_MULTI")
+    rug = sec.get("rug_ratio")
+    if rug is None:
+        rug = info.get("rug_ratio")
+    try:
+        rug_f = float(rug) if rug is not None else None
+    except (TypeError, ValueError):
+        rug_f = None
+    if rug_f is not None:
+        if rug_f > 1:
+            rug_f = rug_f / 100.0
+        row["gmgn_rug_ratio"] = rug_f
+        if rug_f >= 0.3:
+            avoid = True
+            avoid_reasons.append(f"rug_ratio {rug_f:.2f}")
+            flags.append("GMGN_HIGH_RUG_RATIO")
+    if avoid:
+        row["risk"] = "HIGH"
+        row["gmgn_avoid"] = True
+        row["gmgn_avoid_reason"] = "; ".join(avoid_reasons)
+        if "DEV_RUG_RISK" not in flags:
+            flags.append("DEV_RUG_RISK")
+    else:
+        row["gmgn_avoid"] = False
+        if creator_status == "creator_close":
+            flags.append("DEV_CLOSED")
+
+    row["flags"] = flags
+    row["sec_provider"] = (row.get("sec_provider") or "") + "+gmgn"
+    row["mechanics_note"] = (
+        f"GMGN burn={sec.get('burn_status')} ratio={burn_ratio} · "
+        f"lock={is_locked} · dev={creator_status or '-'} created={created_count}"
+    )
+    return row
+
+
+def is_dev_rug_risk(row: Dict) -> bool:
+    if row.get("gmgn_avoid"):
+        return True
+    flags = " ".join(str(f).upper() for f in (row.get("flags") or []))
+    return any(x in flags for x in (
+        "DEV_RUG_RISK", "DEV_SERIAL_DEPLOYER", "GMGN_HIGH_RUG_RATIO", "CREATOR_RUGGED",
+    ))
 
 
 def detect_mechanics(row: Dict) -> Dict:
@@ -1766,6 +1978,8 @@ def is_early_setup(row: Dict, mode: str = "balanced") -> bool:
     if not age_ok or not band or not tape:
         return False
     if holders > 0 and top10 >= 42:
+        return False
+    if is_dev_rug_risk(row):
         return False
     return True
 
@@ -2169,6 +2383,10 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
             row["buyback_status"] = mech.get("buyback_status") or row.get("buyback_status")
             row["mechanics_note"] = mech.get("note") or ""
             try:
+                apply_gmgn_enrich(row)
+            except Exception as ge:
+                print("gmgn enrich error:", ge)
+            try:
                 apply_cmc_mechanics(row)
             except Exception as ce:
                 print("cmc mechanics error:", ce)
@@ -2559,6 +2777,9 @@ def is_green_signal(row: Dict) -> bool:
     # WAJIB: ada smart wallet FOMO
     if FOMO_REQUIRE_SMART and not has_fomo_smart_wallet(row):
         return False
+    # hindari token yang dev-nya punya jejak rug / serial deployer (GMGN)
+    if is_dev_rug_risk(row):
+        return False
     return True
 
 
@@ -2919,6 +3140,25 @@ def analisa_id(row: Dict) -> str:
     fomo_on = bool(row.get("fomo_smart_holders")) or bool(row.get("fomo_board"))
     lines.append("━━━━━━━━━━━━━━")
     lines.append("🧩 <b>SUMBER GABUNGAN</b>")
+    if row.get("gmgn_ok"):
+        lines.append("🦞 <b>GMGN</b> (burn / LP / token dev)")
+        lines.append(f"· LP {row.get('lp_status') or '-'} · Burn {row.get('burn_status') or '-'}")
+        lines.append(f"· Buyback {row.get('buyback_status') or '-'}")
+        lines.append(
+            f"· Dev status <b>{row.get('gmgn_creator_status') or '-'}</b> · "
+            f"hold {row.get('gmgn_creator_hold_pct') or 0}% · "
+            f"created {row.get('gmgn_creator_created_count') or 0} token"
+        )
+        if row.get("gmgn_creator"):
+            lines.append(f"· Creator <code>{row.get('gmgn_creator')}</code>")
+        if row.get("gmgn_rug_ratio") is not None:
+            lines.append(f"· Rug ratio {row.get('gmgn_rug_ratio')}")
+        if row.get("gmgn_avoid"):
+            lines.append(f"· 🚨 <b>HINDARI</b>: {row.get('gmgn_avoid_reason') or 'dev rug risk'}")
+        elif row.get("gmgn_creator_status") == "creator_close":
+            lines.append("· ✅ dev sudah close/jual alokasi")
+    else:
+        lines.append(f"🦞 GMGN: {row.get('gmgn_error') or 'tidak ada data / chain tidak support'}")
     if yodao_on:
         dev = float(row.get("yodao_dev_holding") or 0)
         sn = float(row.get("yodao_snipers") or 0)
