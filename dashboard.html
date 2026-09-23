@@ -573,17 +573,32 @@ function multiSourceHtml(item) {
   const cHold = Number(item.gmgn_creator_hold_pct || 0);
   const cCnt = Number(item.gmgn_creator_created_count || 0);
   const rug = item.gmgn_rug_ratio;
+  const gScore = item.gmgn_score;
+  const gVerdict = item.gmgn_verdict || "";
+  const chg = item.gmgn_chg || {};
+  const chgPretty = [];
+  if (chg.m5 != null) chgPretty.push("5m " + (chg.m5>=0?"+":"") + Number(chg.m5).toFixed(1) + "%");
+  if (chg.h1 != null) chgPretty.push("1h " + (chg.h1>=0?"+":"") + Number(chg.h1).toFixed(1) + "%");
+  if (chg.h6 != null) chgPretty.push("6h " + (chg.h6>=0?"+":"") + Number(chg.h6).toFixed(1) + "%");
+  if (chg.h24 != null) chgPretty.push("24h " + (chg.h24>=0?"+":"") + Number(chg.h24).toFixed(1) + "%");
   const gBody = gOn ? `
+    <div class="src-row"><span>Verdict</span><b style="color:${gVerdict.includes("CLEAN")?"#4ade80":(gVerdict.includes("RISKY")?"#f87171":"#fbbf24")}">${gVerdict || "-"}${gScore!=null?" · "+gScore+"/100":""}</b></div>
     <div class="src-row"><span>LP</span><b>${item.lp_status || "-"}</b></div>
     <div class="src-row"><span>Burn</span><b>${item.burn_status || "-"}</b></div>
-    <div class="src-row"><span>Buyback</span><b>${item.buyback_status || "-"}</b></div>
+    <div class="src-row"><span>Smart / KOL</span><b>${item.gmgn_smart||0} / ${item.gmgn_renowned||0}</b></div>
+    <div class="src-row"><span>Sniper / Bundler</span><b>${item.gmgn_sniper||0} / ${item.gmgn_bundler||0}</b></div>
+    <div class="src-row"><span>Fresh / Rat</span><b>${item.gmgn_fresh||0} / ${item.gmgn_rat||0}</b></div>
+    ${chgPretty.length ? `<div class="src-row"><span>Δ GMGN</span><b style="font-size:11px">${chgPretty.join(" · ")}</b></div>` : ""}
+    <div class="src-row"><span>Tx 24h</span><b>buy ${item.gmgn_buys_24h||0} / sell ${item.gmgn_sells_24h||0}</b></div>
     <div class="src-row"><span>Dev status</span><b style="color:${cStat==="creator_close"?"#4ade80":(cStat==="creator_hold"?"#f87171":"#e2e8f0")}">${cStat}</b></div>
-    <div class="src-row"><span>Dev hold</span><b style="color:${cHold>=8?"#f87171":"#e2e8f0"}">${cHold.toFixed(1)}%</b></div>
-    <div class="src-row"><span>Dev created</span><b style="color:${cCnt>=8?"#f87171":"#e2e8f0"}">${cCnt} token</b></div>
+    <div class="src-row"><span>Dev hold / created</span><b style="color:${cHold>=8||cCnt>=8?"#f87171":"#e2e8f0"}">${cHold.toFixed(1)}% · ${cCnt}</b></div>
+    <div class="src-row"><span>Mint / Freeze</span><b>${item.gmgn_renounced_mint===true?"✅":(item.gmgn_renounced_mint===false?"❌":"?")} / ${item.gmgn_renounced_freeze===true?"✅":(item.gmgn_renounced_freeze===false?"❌":"?")}</b></div>
+    ${item.gmgn_launchpad ? `<div class="src-row"><span>Launchpad</span><b>${item.gmgn_launchpad}</b></div>` : ""}
     ${rug != null ? `<div class="src-row"><span>Rug ratio</span><b style="color:${Number(rug)>=0.3?"#f87171":"#4ade80"}">${Number(rug).toFixed(2)}</b></div>` : ""}
+    ${(item.gmgn_notes||[]).length ? `<div class="src-ok" style="margin-top:6px">${(item.gmgn_notes||[]).slice(0,6).join(" · ")}</div>` : ""}
     ${item.gmgn_creator ? `<div class="src-row"><span>Creator</span><b style="font-size:11px;word-break:break-all">${item.gmgn_creator}</b></div>` : ""}
-    ${item.gmgn_dev_ath_symbol ? `<div class="src-row"><span>Dev ATH coin</span><b>$${item.gmgn_dev_ath_symbol} · ${money(item.gmgn_dev_ath_mc)}</b></div>` : ""}
   ` : `<p class="muted" style="margin:0">${item.gmgn_error || "GMGN kosong / chain tidak support (sol, bsc, base, eth)."}</p>`;
+
 
   const bias = [];
   if (item.gmgn_avoid) bias.push("HINDARI dev rug");
