@@ -3084,11 +3084,147 @@ def donate_text() -> str:
 
 def menu_buttons() -> dict:
     return {"inline_keyboard": [
-        [{"text": "🔍 Scan kandidat", "callback_data": "scan"}],
+        [{"text": "⭐ Setup 5★", "callback_data": "stars5"}, {"text": "🔍 Scan early", "callback_data": "scan"}],
         [{"text": "🚀 Yodao Pump", "callback_data": "yodao"}, {"text": "🔥 FOMO Board", "callback_data": "fomo"}],
         [{"text": "📊 Statistik signal", "callback_data": "stats"}],
         [{"text": "☕ Donasi USDT", "callback_data": "donasi"}],
     ]}
+
+
+def is_five_star_setup(row: Dict) -> bool:
+    """Sama logika BELI ★★★★★ di analisa_id: early + POSSIBLE + BUY + skor aman."""
+    if row.get("honeypot") or row.get("risk") in ("HONEYPOT", "HIGH"):
+        return False
+    if row.get("gmgn_avoid") or is_dev_rug_risk(row):
+        return False
+    if not is_early_setup(row, "balanced"):
+        return False
+    upside = str(row.get("upside") or "").upper()
+    if upside in ("WASHY", "THIN", "NO UPSIDE"):
+        return False
+    rpt = row.get("ca_report") or {}
+    if not rpt:
+        rpt = ca_analysis(row)
+        row["ca_report"] = rpt
+    tw = str(rpt.get("trend_window") or row.get("trend_window") or "")
+    if tw != "POSSIBLE":
+        return False
+    health = float(rpt.get("health_score") or row.get("health_score") or 0)
+    aman = float(rpt.get("safety_score") or row.get("safety_score") or 0)
+    if health < 75 or aman < 70:
+        return False
+    tape, _ = _tape_label(row)
+    if not str(tape).startswith("BUY"):
+        return False
+    top1 = float(row.get("top1_pct") or 0)
+    if top1 >= 10:
+        return False
+    return True
+
+
+def find_five_star_setups(limit: int = 5) -> List[Dict]:
+    """Scan discovery + quality, ambil yang lolos kriteria 5★."""
+    candidates: List[Dict] = []
+    seen = set()
+    try:
+        for row in scan_top(limit=20, mode="balanced"):
+            key = (str(row.get("chain") or "").lower(), (row.get("token_address") or "").lower())
+            if key[1] and key not in seen:
+                seen.add(key)
+                candidates.append(row)
+    except Exception as e:
+        print("stars5 scan_top:", e)
+    try:
+        for row in scan_quality(limit=15):
+            key = (str(row.get("chain") or "").lower(), (row.get("token_address") or "").lower())
+            if key[1] and key not in seen:
+                seen.add(key)
+                candidates.append(row)
+    except Exception as e:
+        print("stars5 quality:", e)
+
+    picked = []
+    for row in candidates:
+        try:
+            if not row.get("ca_report"):
+                row["ca_report"] = ca_analysis(row)
+            # enrich ringan GMGN kalau Solana (opsional, jangan gagalkan)
+            chain = str(row.get("chain") or "").lower()
+            if chain in GMGN_CHAIN and not row.get("gmgn_ok"):
+                try:
+                    apply_gmgn_enrich(row)
+                except Exception:
+                    pass
+            if is_five_star_setup(row):
+                tape, _ = _tape_label(row)
+                row["_stars_tape"] = tape
+                row["_stars_tw"] = (row.get("ca_report") or {}).get("trend_window")
+                picked.append(row)
+        except Exception as e:
+            print("stars5 row:", e)
+    picked.sort(
+        key=lambda x: (
+            float((x.get("ca_report") or {}).get("safety_score") or 0),
+            float((x.get("ca_report") or {}).get("health_score") or 0),
+            int(x.get("confidence") or 0),
+        ),
+        reverse=True,
+    )
+    return picked[:limit]
+
+
+def send_five_star_candidates(chat_id: str) -> None:
+    send_telegram(
+        "⭐ Scan setup <b>5★</b>…\n"
+        "Syarat: early · window POSSIBLE · tape BUY · tape≥75 · aman≥70 · bukan wash/dominan",
+        chat_id=chat_id,
+    )
+    try:
+        rows = find_five_star_setups(limit=5)
+    except Exception as e:
+        send_telegram(f"Scan 5★ gagal: {e}", buttons=menu_buttons(), chat_id=chat_id)
+        return
+    if not rows:
+        send_telegram(
+            "⭐ <b>Belum ada setup 5★ sekarang</b>\n"
+            "Pasar sedang sepi / belum lolos semua syarat ketat.\n"
+            "Coba <b>Scan early</b> atau ulangi beberapa menit.",
+            buttons=menu_buttons(),
+            chat_id=chat_id,
+        )
+        return
+    lines = [
+        f"⭐ <b>SETUP 5★</b> · {len(rows)} token",
+        "Early + POSSIBLE + BUY + skor tinggi · size kecil",
+        "",
+    ]
+    kb = []
+    for i, row in enumerate(rows, 1):
+        addr = row.get("token_address") or ""
+        rpt = row.get("ca_report") or {}
+        chg = float(row.get("price_change_24h") or 0)
+        lines.append(
+            f"<b>{i}. ${row.get('symbol') or '-'}</b> · {str(row.get('chain') or '').upper()}"
+        )
+        lines.append(
+            f"⭐⭐⭐⭐⭐ · {(row.get('_stars_tw') or rpt.get('trend_window') or '-')} · "
+            f"{row.get('_stars_tape') or '-'}"
+        )
+        lines.append(
+            f"💧 {_usd(row.get('liquidity_usd'))} · 🏦 {_usd(row.get('market_cap'))} · "
+            f"📈 {chg:+.1f}% · ⏱ {row.get('age_hours') or '-'}j"
+        )
+        lines.append(
+            f"Tape {rpt.get('health_score') or '-'} · Aman {rpt.get('safety_score') or '-'} · "
+            f"{row.get('upside') or '-'}"
+        )
+        lines.append(f"<code>{addr}</code>")
+        lines.append("")
+        if addr:
+            kb.append([{"text": f"🔬 Analisa ${row.get('symbol') or i}", "callback_data": "ca:" + addr[:60]}])
+    kb.append([{"text": "⭐ Scan 5★ lagi", "callback_data": "stars5"}])
+    kb.append([{"text": "🔍 Scan early", "callback_data": "scan"}])
+    send_telegram("\n".join(lines).strip(), buttons={"inline_keyboard": kb}, chat_id=chat_id)
 
 
 def send_fomo_candidates(chat_id: str) -> None:
@@ -3219,8 +3355,9 @@ def tg_buttons(row: Dict) -> dict:
     if row_btns:
         buttons.append(row_btns)
     buttons.append([
+        {"text": "⭐ 5★", "callback_data": "stars5"},
         {"text": "🔍 Scan", "callback_data": "scan"},
-        {"text": "☕ Donasi USDT", "callback_data": "donasi"},
+        {"text": "☕ Donasi", "callback_data": "donasi"},
     ])
     return {"inline_keyboard": buttons}
 
@@ -3585,6 +3722,8 @@ def process_tg_update(upd: Dict) -> None:
             return
         if data == "donasi":
             send_telegram(donate_text(), buttons=donate_buttons(), chat_id=str(chat))
+        elif data == "stars5":
+            send_five_star_candidates(str(chat))
         elif data == "scan":
             send_scan_candidates(str(chat))
         elif data == "yodao":
@@ -3604,10 +3743,16 @@ def process_tg_update(upd: Dict) -> None:
         return
     if text.startswith("/start"):
         send_telegram(
-            "Tempel <b>CA</b> atau tekan <b>Scan</b>.\n/scan — kandidat lolos filter\n/donasi — USDT",
+            "Tempel <b>CA</b> atau tekan menu.\n"
+            "⭐ /stars — setup 5★ ketat\n"
+            "🔍 /scan — kandidat early\n"
+            "/donasi — USDT",
             buttons=menu_buttons(),
             chat_id=str(chat),
         )
+        return
+    if text.startswith("/stars") or text.lower() in ("stars", "5star", "setup5", "bintang5"):
+        send_five_star_candidates(str(chat))
         return
     if text.startswith("/scan") or text.lower() == "scan":
         send_scan_candidates(str(chat))
@@ -3712,12 +3857,17 @@ def tg_buttons(row: Dict) -> dict:
     fomo = fomo_url(row)
     dex = dex_url(row)
     if fomo:
-        row_btns.append({"text": "Trade FOMO", "url": fomo})
+        row_btns.append({"text": "⚡️ Trade FOMO", "url": fomo})
     if dex:
-        row_btns.append({"text": "DexScreener", "url": dex})
+        row_btns.append({"text": "📉 DexScreener", "url": dex})
     if row_btns:
         buttons.append(row_btns)
-    return {"inline_keyboard": buttons} if buttons else {}
+    buttons.append([
+        {"text": "⭐ 5★", "callback_data": "stars5"},
+        {"text": "🔍 Scan", "callback_data": "scan"},
+        {"text": "☕ Donasi", "callback_data": "donasi"},
+    ])
+    return {"inline_keyboard": buttons}
 
 
 def dex_url(row: Dict) -> str:
