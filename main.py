@@ -3529,6 +3529,11 @@ def analisa_id(row: Dict) -> str:
     return "\n".join(lines)
 
 
+# anti-double kirim analisa CA (webhook + poll / photo+text)
+_CA_SENT_LOCK = threading.Lock()
+_CA_SENT: Dict[str, float] = {}
+
+
 def handle_ca_message(text: str, chat_id: str) -> Dict[str, Any]:
     addr = extract_ca(text)
     if not addr:
@@ -3537,7 +3542,15 @@ def handle_ca_message(text: str, chat_id: str) -> Dict[str, Any]:
             chat_id=chat_id,
         )
         return {"ok": False, "reason": "no_ca"}
-    send_telegram(f"Cek CA <code>{addr}</code> ...", chat_id=chat_id)
+    dedupe_key = f"{chat_id}:{addr.lower()}"
+    now = time.time()
+    with _CA_SENT_LOCK:
+        last = _CA_SENT.get(dedupe_key, 0)
+        if now - last < 45:
+            # sudah dikirim baru saja — skip double
+            return {"ok": True, "symbol": "", "address": addr, "deduped": True}
+        _CA_SENT[dedupe_key] = now
+    send_telegram(f"⏳ Cek CA <code>{addr}</code> ...", chat_id=chat_id)
     rows = scan_ca(address=addr, chain="")
     if isinstance(rows, dict) and rows.get("error"):
         send_telegram(f"Gagal: {rows.get('error')}\n<code>{addr}</code>", chat_id=chat_id)
@@ -3548,9 +3561,11 @@ def handle_ca_message(text: str, chat_id: str) -> Dict[str, Any]:
     row = rows[0]
     caption = analisa_id(row)
     icon = row.get("icon") or ""
-    if icon:
-        send_telegram_photo(icon, caption[:1024], buttons=tg_buttons(row), chat_id=chat_id)
-        if len(caption) > 900:
+    # Hanya KIRIM SEKALI: caption panjang → teks saja (bukan photo + teks)
+    # Photo Telegram max caption 1024; analisa kita biasanya >1024
+    if icon and len(caption) <= 1000:
+        ok = send_telegram_photo(icon, caption, buttons=tg_buttons(row), chat_id=chat_id)
+        if not ok:
             send_telegram(caption, buttons=tg_buttons(row), chat_id=chat_id)
     else:
         send_telegram(caption, buttons=tg_buttons(row), chat_id=chat_id)
