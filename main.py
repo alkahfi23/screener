@@ -1517,6 +1517,28 @@ def group_best_by_token(pairs: List[Dict]) -> Dict[str, Dict]:
     return best
 
 
+FOMO_REQUIRE_SMART = os.getenv("FOMO_REQUIRE_SMART", "1") == "1"
+FOMO_MIN_SMART = int(os.getenv("FOMO_MIN_SMART", "1"))
+
+
+def has_fomo_smart_wallet(row: Dict) -> bool:
+    """Lolos hanya jika ada smart wallet FOMO yang pegang (atau di board FOMO)."""
+    if not FOMO_REQUIRE_SMART:
+        return True
+    n = int(row.get("fomo_smart_count") or 0)
+    if n >= FOMO_MIN_SMART:
+        return True
+    flags = " ".join(str(f).upper() for f in (row.get("flags") or []))
+    if "FOMO_SMART_HOLDERS" in flags or "FOMO_CROWD_IN" in flags:
+        return True
+    # board trending/graduated = sudah di radar FOMO traders
+    if row.get("fomo_board") in ("trending", "graduated"):
+        return True
+    if row.get("source") == "fomo" and row.get("token_address"):
+        return True
+    return False
+
+
 def is_early_setup(row: Dict, mode: str = "balanced") -> bool:
     """Hidden gem: masih early, bukan honeypot. Longgar di tape, kaku di rug."""
     if row.get("honeypot") or row.get("risk") in ("HONEYPOT",):
@@ -1598,7 +1620,41 @@ def scan_top(
         picked = [r for r in secured if is_early_setup(r, mode) or (
             mode == "aggressive" and r.get("source") == "yodao" and r.get("risk") != "HIGH"
         )]
-        picked.sort(key=lambda x: (x.get("confidence") or 0, x.get("score") or 0), reverse=True)
+        # merge FOMO board tokens (sudah punya smart money sosial)
+        try:
+            seen_mints = {(r.get("token_address") or "").lower() for r in picked}
+            for fr in fetch_fomo_boards(limit=25):
+                mint = (fr.get("token_address") or "").lower()
+                if not mint or mint in seen_mints:
+                    continue
+                if is_early_setup(fr, mode) or mode == "aggressive":
+                    fr["fomo_smart_count"] = max(int(fr.get("fomo_smart_count") or 0), 1)
+                    picked.append(fr)
+                    seen_mints.add(mint)
+        except Exception as fe:
+            print("fomo merge discovery error:", fe)
+        # cek smart wallet FOMO (mahal credits → hanya top kandidat)
+        if FOMO_REQUIRE_SMART and FOMO_API_KEY and mode != "aggressive":
+            enriched = []
+            for r in picked[:25]:
+                if r.get("source") == "fomo" or int(r.get("fomo_smart_count") or 0) >= FOMO_MIN_SMART:
+                    enriched.append(r)
+                    continue
+                try:
+                    apply_fomo_enrich(r)
+                except Exception as e:
+                    print("fomo filter enrich:", e)
+                if has_fomo_smart_wallet(r):
+                    enriched.append(r)
+            picked = enriched
+        elif FOMO_REQUIRE_SMART and not FOMO_API_KEY and mode != "aggressive":
+            # tanpa key: hanya yang source fomo (kosong) → discovery kosong, lebih aman
+            picked = [r for r in picked if has_fomo_smart_wallet(r)]
+        picked.sort(key=lambda x: (
+            int(x.get("fomo_smart_count") or 0),
+            x.get("confidence") or 0,
+            x.get("score") or 0,
+        ), reverse=True)
         remember_tokens(picked[:limit])
         return picked[:limit]
     except Exception as e:
@@ -2305,6 +2361,9 @@ def is_green_signal(row: Dict) -> bool:
     if age is not None and (age < 2 or age > 72):
         return False
     if top10 >= 40:
+        return False
+    # WAJIB: ada smart wallet FOMO
+    if FOMO_REQUIRE_SMART and not has_fomo_smart_wallet(row):
         return False
     return True
 
@@ -3219,6 +3278,12 @@ def run_alert_pass() -> Dict:
         sent = 0
         now = time.time()
         for row in rows:
+            # pastikan FOMO smart sudah di-enrich sebelum green check
+            if FOMO_REQUIRE_SMART and FOMO_API_KEY and not has_fomo_smart_wallet(row):
+                try:
+                    apply_fomo_enrich(row)
+                except Exception as e:
+                    print("alert fomo enrich:", e)
             if not is_green_signal(row):
                 continue
             key = f"{row.get('chain')}:{(row.get('token_address') or '').lower()}"
@@ -3228,7 +3293,12 @@ def run_alert_pass() -> Dict:
             if notify_token(row):
                 SENT_ALERTS[key] = now
                 sent += 1
-        result = {"checked": len(rows), "sent": sent}
+        result = {
+            "checked": len(rows),
+            "sent": sent,
+            "fomo_require": FOMO_REQUIRE_SMART,
+            "fomo_key": bool(FOMO_API_KEY),
+        }
         WORKER["last_result"] = result
         return result
     except Exception as e:
