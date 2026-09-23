@@ -1354,6 +1354,196 @@ def check_evm_burn(chain: str, token: str) -> Dict:
     return {"ok": True, "burned_tokens": burned}
 
 
+# ---------- CoinMarketCap (burn / LP / buyback signals) ----------
+CMC_API_KEY = os.getenv("CMC_API_KEY", "").strip()
+CMC_BASE = os.getenv("CMC_API_BASE", "https://pro-api.coinmarketcap.com").rstrip("/")
+CMC_PLATFORM = {
+    "solana": "Solana",
+    "ethereum": "Ethereum",
+    "eth": "Ethereum",
+    "bsc": "BSC",
+    "bnb": "BSC",
+    "base": "Base",
+    "arbitrum": "Arbitrum",
+    "avalanche": "Avalanche",
+    "polygon": "Polygon",
+    "optimism": "Optimism",
+}
+
+
+def cmc_headers() -> Dict:
+    h = {"Accept": "application/json"}
+    if CMC_API_KEY:
+        h["X-CMC_PRO_API_KEY"] = CMC_API_KEY
+    return h
+
+
+def fetch_cmc_security(chain: str, address: str) -> Dict:
+    """GET /v1/dex/security/detail — keyless via /public-api atau dengan CMC_API_KEY."""
+    if not address:
+        return {}
+    platform = CMC_PLATFORM.get((chain or "").lower())
+    if not platform:
+        return {}
+    try:
+        if CMC_API_KEY:
+            url = f"{CMC_BASE}/v1/dex/security/detail"
+        else:
+            url = f"{CMC_BASE}/public-api/v1/dex/security/detail"
+        r = SESSION.get(
+            url,
+            params={"platformName": platform, "address": address},
+            headers=cmc_headers(),
+            timeout=14,
+        )
+        if not r.ok:
+            print("cmc security", r.status_code, r.text[:160])
+            return {}
+        data = r.json().get("data")
+        if isinstance(data, list) and data:
+            return data[0] if isinstance(data[0], dict) else {}
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("cmc security error:", e)
+        return {}
+
+
+def fetch_cmc_token(chain: str, address: str) -> Dict:
+    """GET /v1/dex/token — detail token CMC (tags, mcap, links)."""
+    if not address:
+        return {}
+    platform = CMC_PLATFORM.get((chain or "").lower())
+    if not platform:
+        return {}
+    try:
+        if CMC_API_KEY:
+            url = f"{CMC_BASE}/v1/dex/token"
+        else:
+            url = f"{CMC_BASE}/public-api/v1/dex/token"
+        r = SESSION.get(
+            url,
+            params={"platform": platform, "address": address},
+            headers=cmc_headers(),
+            timeout=14,
+        )
+        if not r.ok:
+            return {}
+        data = r.json().get("data")
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("cmc token error:", e)
+        return {}
+
+
+def parse_cmc_mechanics(sec: Dict, tok: Dict) -> Dict:
+    """Map CMC securityItems + token meta → LP / burn / buyback status."""
+    items = sec.get("securityItems") or []
+    codes = []
+    hits = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        code = str(it.get("code") or it.get("name") or "").strip()
+        desc = str(it.get("description") or "").strip()
+        blob = f"{code} {desc}".lower()
+        codes.append(blob)
+        # isHit true = risk found; for positive LP lock wording varies
+        if it.get("isHit") is True or "found" in code.lower() and "not found" not in code.lower():
+            hits.append(blob)
+    all_txt = " | ".join(codes)
+    tags = tok.get("tags") or sec.get("tags") or []
+    if isinstance(tags, list):
+        tag_txt = " ".join(str(t).lower() for t in tags)
+    else:
+        tag_txt = str(tags).lower()
+    meta_blob = " ".join([
+        all_txt,
+        tag_txt,
+        str(tok.get("n") or tok.get("name") or ""),
+        str(tok.get("desc") or tok.get("description") or ""),
+    ]).lower()
+
+    lp_status = "LP UNKNOWN"
+    if any(k in meta_blob for k in (
+        "liquidity burned", "lp burned", "lp burn", "liquidity locked",
+        "lp locked", "lock liquidity", "liquidity lock",
+    )):
+        # distinguish hit vs not found
+        if any("not found" in c and any(x in c for x in ("liquidity", "lp lock", "lp burn")) for c in codes):
+            lp_status = "LP UNLOCKED"
+        else:
+            lp_status = "LP BURN / LOCK"
+    if any("liquidity risk" in c and "not found" not in c for c in hits):
+        lp_status = "LP RISK"
+    # explicit not found liquidity risk → unlocked-ish
+    if "liquidity risk not found" in all_txt and lp_status == "LP UNKNOWN":
+        lp_status = "LP OK (CMC)"
+
+    burn = "BURN UNKNOWN"
+    if any(k in meta_blob for k in ("token burn", "supply burn", "burned", "deflation", "dead wallet", "burn mechanism")):
+        if "not found" in all_txt and "burn" in all_txt and "burned" not in " ".join(hits):
+            burn = "NO BURN (CMC)"
+        else:
+            burn = "TOKEN BURN (CMC)"
+    if any("self-destruct" in c and "not found" not in c for c in hits):
+        burn = "SELF-DESTRUCT RISK"
+
+    buyback = "BUYBACK UNKNOWN"
+    if any(k in meta_blob for k in ("buyback", "buy back", "buy-back", "repurchase", "revenue share")):
+        buyback = "BUYBACK CLAIM (CMC)"
+
+    level = str(sec.get("securityLevel") or "").lower()
+    note = f"CMC security={level or '-'} · platform={sec.get('platformName') or '-'}"
+    if not sec and not tok:
+        note = "CMC: tidak ada data security/token"
+    return {
+        "lp_status": lp_status,
+        "burn_status": burn,
+        "buyback_status": buyback,
+        "note": note,
+        "cmc_level": level,
+        "cmc_ok": bool(sec) or bool(tok),
+    }
+
+
+def apply_cmc_mechanics(row: Dict) -> Dict:
+    """Isi LP/burn/buyback dari CoinMarketCap API."""
+    chain = str(row.get("chain") or "").lower()
+    addr = row.get("token_address") or ""
+    if not addr or chain not in CMC_PLATFORM:
+        return row
+    sec = fetch_cmc_security(chain, addr)
+    tok = fetch_cmc_token(chain, addr)
+    parsed = parse_cmc_mechanics(sec, tok)
+    row["cmc_security"] = {
+        "level": sec.get("securityLevel"),
+        "category": sec.get("categoryLevel"),
+        "items": len(sec.get("securityItems") or []),
+    }
+    row["cmc_ok"] = parsed.get("cmc_ok")
+    # CMC override kalau lebih informatif dari UNKNOWN
+    if parsed.get("lp_status") and parsed["lp_status"] != "LP UNKNOWN":
+        row["lp_status"] = parsed["lp_status"]
+    if parsed.get("burn_status") and parsed["burn_status"] not in ("BURN UNKNOWN",):
+        row["burn_status"] = parsed["burn_status"]
+    if parsed.get("buyback_status") and parsed["buyback_status"] not in ("BUYBACK UNKNOWN",):
+        row["buyback_status"] = parsed["buyback_status"]
+    row["mechanics_note"] = (row.get("mechanics_note") or "") + " | " + parsed.get("note", "")
+    row["mechanics_note"] = row["mechanics_note"].strip(" |")
+    # honeypot hint dari CMC
+    for it in sec.get("securityItems") or []:
+        code = str(it.get("code") or "").lower()
+        if "honeypot" in code and "not found" not in code and it.get("isHit") is not False:
+            if "not found" not in code:
+                row["honeypot"] = True
+                row["risk"] = "HONEYPOT"
+    evm = sec.get("evmDisplay") or {}
+    if str(evm.get("honeypotStatus") or "").lower() in ("yes", "true", "honeypot"):
+        row["honeypot"] = True
+        row["risk"] = "HONEYPOT"
+    return row
+
+
 def detect_mechanics(row: Dict) -> Dict:
     flags = " ".join(str(f).lower() for f in (row.get("flags") or []))
     blob = " ".join([
@@ -1381,7 +1571,7 @@ def detect_mechanics(row: Dict) -> Dict:
     elif isinstance(onchain, dict) and onchain.get("reason"):
         burn = "BURN UNKNOWN"
     buyback = "BUYBACK CLAIM" if any(k in blob for k in ("buyback", "buy back", "buy-back", "repurchase")) else "BUYBACK UNKNOWN"
-    note = "LP dari RugCheck. Burn EVM via Etherscan kalau ETHERSCAN_API_KEY ada. Buyback tetap klaim teks."
+    note = "LP RugCheck · burn Etherscan (EVM) · buyback teks · CMC di apply_cmc_mechanics"
     return {"lp_status": lp_status, "burn_status": burn, "buyback_status": buyback, "note": note}
 
 
@@ -1976,8 +2166,12 @@ def scan_ca(address: str = Query(..., min_length=8), chain: str = Query("")):
             mech = detect_mechanics(row)
             row["lp_status"] = mech["lp_status"]
             row["burn_status"] = mech["burn_status"]
-            row["buyback_status"] = mech["buyback_status"]
-            row["mechanics_note"] = mech["note"]
+            row["buyback_status"] = mech.get("buyback_status") or row.get("buyback_status")
+            row["mechanics_note"] = mech.get("note") or ""
+            try:
+                apply_cmc_mechanics(row)
+            except Exception as ce:
+                print("cmc mechanics error:", ce)
             row["ca_report"] = ca_analysis(row)
             try:
                 apply_yodao_enrich(row)
