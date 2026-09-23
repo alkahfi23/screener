@@ -3373,29 +3373,33 @@ def analisa_id(row: Dict) -> str:
     upside = str(row.get("upside") or "-")
     h_lines, dominan, top1 = holder_block(row)
 
+    # Label eksplisit: BELI / PANTAU SAJA / JANGAN ENTRY
     if honey or risk in ("HONEYPOT",) or row.get("gmgn_avoid"):
-        sig, sig_ico, putusan = "JANGAN BELI", "🛑", row.get("gmgn_avoid_reason") or "Honeypot / dev rug risk"
+        sig, sig_ico, putusan = "JANGAN ENTRY", "🛑", row.get("gmgn_avoid_reason") or "Honeypot / dev rug risk"
         stars_n = 1
     elif risk == "HIGH" or tw == "AVOID":
-        sig, sig_ico, putusan = "JANGAN BELI", "🛑", "Risiko tinggi / window mati"
+        sig, sig_ico, putusan = "JANGAN ENTRY", "🛑", "Risiko tinggi / window mati — jangan dipaksa"
         stars_n = 1
     elif dominan and top1 >= 20:
-        sig, sig_ico, putusan = "JANGAN BELI", "🚨", f"Holder dominan {top1:.1f}%"
+        sig, sig_ico, putusan = "JANGAN ENTRY", "🚨", f"Holder dominan {top1:.1f}% — mudah di-dump"
         stars_n = 1
     elif not early or tw == "UNLIKELY" or upside in ("WASHY", "THIN", "NO UPSIDE"):
-        sig, sig_ico, putusan = "JANGAN BELI", "🚫", "Bukan setup early"
+        sig, sig_ico, putusan = "JANGAN ENTRY", "🚫", "Bukan setup early (wash / sudah telat / mcap besar)"
         stars_n = 2
     elif dominan:
-        sig, sig_ico, putusan = "JANGAN KEJAR", "🚨", f"Top1 {top1:.1f}% ≥10%"
+        sig, sig_ico, putusan = "JANGAN ENTRY", "🚨", f"Top1 {top1:.1f}% ≥10% — konsentrasi tinggi"
         stars_n = 2
     elif tw == "POSSIBLE" and early and tape.startswith("BUY"):
-        sig, sig_ico, putusan = "BELI SPEKULATIF", "🟢", "Early + tape beli · size kecil"
+        sig, sig_ico, putusan = "BELI", "🟢", "Setup early + window POSSIBLE + tape beli · size kecil · ada exit plan"
         stars_n = 5 if (aman or 0) >= 70 and (health or 0) >= 75 else 4
     elif tw == "POSSIBLE" and early:
-        sig, sig_ico, putusan = "PANTAU DULU", "🟡", "Early oke, tape belum jelas"
+        sig, sig_ico, putusan = "PANTAU SAJA", "🟡", "Struktur early oke — JANGAN beli dulu, tunggu tape jelas"
+        stars_n = 3
+    elif tw == "WATCH" and early and risk == "LOW":
+        sig, sig_ico, putusan = "PANTAU SAJA", "🟡", "Masih early tapi window belum hijau — pantau, bukan entry"
         stars_n = 3
     else:
-        sig, sig_ico, putusan = "JANGAN KEJAR", "⚠️", "Belum cukup untuk masuk"
+        sig, sig_ico, putusan = "JANGAN ENTRY", "⚠️", "Belum cukup syarat (window/tape/risiko) — skip"
         stars_n = 2
 
     stars = "★" * stars_n + "☆" * (5 - stars_n)
@@ -3783,7 +3787,7 @@ def format_alert(row: Dict) -> str:
 
     chart = f'<a href="{_esc(link)}">DexScreener</a>' if link else "—"
     body = (
-        f"🟢 <b>GREEN GEM</b> · BELI SPEKULATIF  ⭐⭐⭐⭐☆\n"
+        f"🟢 <b>GREEN GEM</b> · BELI (size kecil)  ★★★★☆\n"
         f"{header}\n"
         f"{chain} · {dex}\n"
         f"──────────────\n"
