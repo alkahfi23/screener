@@ -3142,20 +3142,20 @@ def holder_block(row: Dict) -> Tuple[list, bool, float]:
     note = row.get("holder_note") or ""
     holders = row.get("top_holders") or []
     dominan = top1 >= 10
-    lines = ["━━━━━━━━━━━━━━", "👥 <b>HOLDERS</b>"]
+    lines = ["──────────────", "👥 <b>HOLDERS</b>"]
     if top1 <= 0 and top10 <= 0 and top1_raw <= 0 and not holders:
-        lines.append("⚪ Data holder kosong (belum dari indexer)")
+        lines.append("⚪ Data holder kosong")
         return lines, False, 0.0
     if dominan:
-        lines.append("🚨 <b>PERINGATAN: whale dominan</b>")
-        lines.append(f"Whale non-LP Top1 <b>{top1:.1f}%</b> (≥10%) — risiko dump")
+        lines.append(f"🚨 Whale Top1 <b>{top1:.1f}%</b> ≥10% — risiko dump")
     else:
-        lines.append(f"✅ Whale Top1 {top1:.1f}% · tidak dominan (&lt;10%)")
+        lines.append(f"✅ Whale Top1 {top1:.1f}% · Top10 {top10:.1f}% · n={n}")
     if lp_h > 0 or (top1_raw >= 10 and top1_raw != top1):
-        lines.append(f"🏦 LP pool di holder list ~{lp_h or top1_raw:.1f}% (bukan whale)")
-    lines.append(f"Top10 non-LP {top10:.1f}% · n={n}")
-    if note:
-        lines.append(f"Catatan: {note}")
+        lines.append(f"🏦 LP di list ~{lp_h or top1_raw:.1f}% (bukan whale)")
+    if note and len(str(note)) < 120:
+        lines.append(f"<i>{note}</i>")
+    elif note:
+        lines.append(f"<i>{str(note)[:100]}…</i>")
     shown = 0
     for h in holders[:8]:
         if not isinstance(h, dict):
@@ -3213,7 +3213,7 @@ def analisa_id(row: Dict) -> str:
         sig, sig_ico, putusan = "JANGAN KEJAR", "⚠️", "Belum cukup untuk masuk"
         stars_n = 2
 
-    stars = "⭐" * stars_n + "☆" * (5 - stars_n)
+    stars = "★" * stars_n + "☆" * (5 - stars_n)
     chg = float(row.get("price_change_24h") or 0)
     chg_ico = "📈" if chg >= 0 else "📉"
     risk_ico = "🟢" if risk == "LOW" else ("🔴" if risk in ("HIGH", "HONEYPOT") else "⚪")
@@ -3222,7 +3222,29 @@ def analisa_id(row: Dict) -> str:
     age = row.get("age_hours")
     age_s = f"{float(age):.1f}j" if age is not None else "-"
     vl = rpt.get("vol_liq")
-    vl_s = f"{float(vl):.2f}x" if vl not in (None, "") else "-"
+    try:
+        vl_s = f"{float(vl):.1f}x" if vl not in (None, "") else "-"
+    except (TypeError, ValueError):
+        vl_s = "-"
+
+    # LP / burn satu baris tanpa dobel
+    lp_s = str(row.get("lp_status") or "")
+    burn_s = str(row.get("burn_status") or "")
+    buy_s = str(row.get("buyback_status") or "")
+    mech_bits = []
+    if lp_s and lp_s not in ("LP UNKNOWN", "LP ?"):
+        mech_bits.append(f"🔒 {lp_s}")
+    if burn_s and burn_s not in ("BURN UNKNOWN", "Burn ?") and "LP/TOKEN BURN" not in lp_s:
+        # jangan ulangi kalau LP sudah bilang BURN
+        if "BURN" in burn_s.upper() and "BURN" in lp_s.upper():
+            pass
+        else:
+            mech_bits.append(f"🔥 {burn_s}")
+    elif burn_s and "BURN" in burn_s.upper() and "BURN" not in lp_s.upper():
+        mech_bits.append(f"🔥 {burn_s}")
+    if buy_s and "UNKNOWN" not in buy_s.upper():
+        mech_bits.append(f"♻️ {buy_s}")
+    mech_line = " · ".join(mech_bits) if mech_bits else "🔒 LP/Burn belum jelas"
 
     lines = [
         f"{sig_ico} <b>{sig}</b>  {stars} <b>{stars_n}/5</b>",
@@ -3231,13 +3253,12 @@ def analisa_id(row: Dict) -> str:
         f"💎 <b>${row.get('symbol') or '-'}</b>" + (f" · {name}" if name else ""),
         f"⛓️ {str(row.get('chain') or '').upper()} · {row.get('dex') or '-'}",
         "──────────────",
-        f"{win_ico} Window  <b>{tw}</b>   {tape_ico} Tape <b>{tape}</b>",
-        f"{risk_ico} Risk  <b>{risk}</b>   🎯 <b>{upside}</b>",
-        f"{'🍯 HONEYPOT' if honey else '✅ Bukan honeypot'} · Tape {health if health is not None else '-'} · Aman {aman if aman is not None else '-'}",
+        f"{win_ico} <b>{tw}</b>  ·  {tape_ico} <b>{tape}</b>  ·  {risk_ico} <b>{risk}</b>  ·  🎯 <b>{upside}</b>",
+        f"{'🍯 HONEYPOT' if honey else '✅ Bukan honeypot'} · Skor tape {health if health is not None else '-'} · aman {aman if aman is not None else '-'}",
         "──────────────",
-        f"💧 {_usd(row.get('liquidity_usd'))}  ·  🏦 {_usd(row.get('market_cap'))}  ·  📦 {_usd(row.get('volume_24h'))}",
-        f"{chg_ico} 24h {chg:+.1f}%  ·  ⏱ {age_s}  ·  📐 {vl_s}",
-        f"🔒 {row.get('lp_status') or 'LP ?'}  ·  🔥 {row.get('burn_status') or 'Burn ?'}  ·  ♻️ {row.get('buyback_status') or 'Buyback ?'}",
+        f"💧 {_usd(row.get('liquidity_usd'))} · 🏦 {_usd(row.get('market_cap'))} · 📦 {_usd(row.get('volume_24h'))}",
+        f"{chg_ico} 24h {chg:+.1f}% · ⏱ {age_s} · vol/liq {vl_s}",
+        mech_line,
     ]
     lines.extend(h_lines)
 
