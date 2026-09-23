@@ -173,7 +173,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
 <div class="container">
   <h1>Hybrid Early Gem Dashboard</h1>
   <div class="controls">
-    <button class="primary" onclick="refreshData()">Refresh</button>
+    <button class="primary" onclick="lastCaKey='';refreshData(true)">Refresh</button>
     <select id="mode" onchange="refreshData()">
       <option value="balanced">Balanced</option>
       <option value="strict">Strict</option>
@@ -210,7 +210,7 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
       <option value="ethereum">ethereum</option>
       <option value="bsc">bsc</option>
     </select>
-    <button class="primary" onclick="setView('ca');refreshData();">Cek CA</button>
+    <button class="primary" onclick="lastCaKey='';setView('ca');refreshData(true);">Cek CA</button>
   </div>
   <div class="legend">
     <span><span class="badge safe">SAFE FILTER</span> risk LOW, bukan honeypot</span>
@@ -481,13 +481,7 @@ function renderCaDash(item) {
       <div class="ca-kpi"><span>Burn</span><b class="badge ${mechClass(item.burn_status)}">${item.burn_status || "BURN UNKNOWN"}</b></div>
       <div class="ca-kpi"><span>Buyback</span><b class="badge ${mechClass(item.buyback_status)}">${item.buyback_status || "BUYBACK UNKNOWN"}</b></div>
     </div>
-    <div>
-      <h3>Chart · 5m / 1h / 6h / 24h ${sparkline(item)}</h3>
-      ${item.pair_address && chainOf(item)
-        ? `<iframe class="chart-frame" src="https://dexscreener.com/${chainOf(item).toLowerCase()}/${item.pair_address}?embed=1&theme=dark&trades=0&info=0" title="chart"></iframe>`
-        : `<p class="note-box">Pair belum ada, chart Dex tidak bisa di-embed.</p>`}
-      <p class="note-box">${item.mechanics_note || "Burn/buyback = LP lock + klaim di nama/web. Bukan indexer burn on-chain."}</p>
-    </div>
+    <p class="note-box">${item.mechanics_note || "Burn/buyback = LP lock + klaim di nama/web. Chart dibuka lewat tombol Dex di bawah (tanpa embed biar tidak kedip)."}</p>
     <div class="ca-grid">
       <div>
         <h3>Indikator window</h3>
@@ -578,12 +572,28 @@ function multiSourceHtml(item) {
   </div>`;
 }
 
-async function refreshData() {
+let refreshBusy = false;
+let lastCaKey = "";
+
+async function refreshData(force) {
+  if (refreshBusy && !force) return;
   const status = document.getElementById("status");
   const table = document.getElementById("tableBody");
   const hideDanger = document.getElementById("hideDanger").checked;
-  table.innerHTML = "";
-  status.innerText = "Fetching data...";
+  const caAddr = (document.getElementById("caInput").value || "").trim();
+  if (currentView === "ca" && caAddr.length < 8) {
+    status.innerText = "Tempel CA / mint dulu, lalu Cek CA";
+    return;
+  }
+  // CA: jangan reload ulang kalau address sama (cegah kedip)
+  const caKey = currentView === "ca" ? (caAddr + "|" + (document.getElementById("caChain").value || "")) : "";
+  if (currentView === "ca" && !force && caKey && caKey === lastCaKey && table.children.length) {
+    status.innerText = "Analisa CA (stabil) · tekan Refresh untuk update";
+    return;
+  }
+  refreshBusy = true;
+  status.innerText = "Loading...";
+  // jangan kosongkan tabel dulu → hindari flash putih/kedip
   const url = currentView === "discovery"
     ? "/scan/top?limit=20&mode=" + document.getElementById("mode").value
     : currentView === "quality"
@@ -595,7 +605,7 @@ async function refreshData() {
     : currentView === "whales"
     ? "/scan/whales"
     : currentView === "ca"
-    ? "/scan/ca?address=" + encodeURIComponent((document.getElementById("caInput").value || "").trim())
+    ? "/scan/ca?address=" + encodeURIComponent(caAddr)
       + (document.getElementById("caChain").value ? "&chain=" + document.getElementById("caChain").value : "")
     : currentView === "cart"
     ? "/cart"
@@ -604,18 +614,28 @@ async function refreshData() {
     const res = await fetch(url);
     const raw = await res.json();
     if (currentView === "ca" && raw && raw.error) {
+      table.innerHTML = "";
       status.innerText = raw.error + " · " + (raw.address || "");
+      lastCaKey = "";
+      refreshBusy = false;
       return;
     }
     if (currentView === "ca" && Array.isArray(raw)) {
       if (!raw.length) {
+        table.innerHTML = "";
         status.innerText = "CA tidak ketemu";
+        lastCaKey = "";
+        refreshBusy = false;
         return;
       }
+      table.innerHTML = "";
       table.appendChild(renderCaDash(raw[0]));
-      status.innerText = "Analisa 1 CA · " + (raw[0].symbol || "");
+      lastCaKey = caKey;
+      status.innerText = "Analisa 1 CA · " + (raw[0].symbol || "") + " · stabil (Refresh manual)";
+      refreshBusy = false;
       return;
     }
+    table.innerHTML = "";
     if (currentView === "cart") {
       if (!Array.isArray(raw) || !raw.length) {
         status.innerText = "Keranjang kosong. Analisa CA dulu, lalu + Keranjang.";
@@ -872,6 +892,8 @@ async function refreshData() {
     status.innerText = "Done (" + shown + "/" + data.length + ")";
   } catch (err) {
     status.innerText = "Error loading data. Server belum nyala.";
+  } finally {
+    refreshBusy = false;
   }
 }
 async function pollWorker() {
@@ -925,11 +947,12 @@ async function removeCart(address, chain) {
   await fetch("/cart/remove?address=" + encodeURIComponent(address) + "&chain=" + encodeURIComponent(chain || ""));
   refreshData();
 }
-refreshData();
+refreshData(true);
 pollWorker();
-setInterval(pollWorker, 5000);
-setInterval(() => { if (currentView === "cart") refreshData(); }, 60000);
-setInterval(() => { if (currentView === "ca" && (document.getElementById("caInput").value || "").trim().length >= 32) refreshData(); }, 8000);
+setInterval(pollWorker, 15000);
+// cart: update pelan, jangan ganggu baca
+setInterval(() => { if (currentView === "cart") refreshData(true); }, 120000);
+// CA: TIDAK auto-refresh (penyebab kedip) — pakai tombol Refresh / Cek CA
 </script>
 </body>
 </html>
