@@ -1816,11 +1816,196 @@ def apply_gmgn_enrich(row: Dict) -> Dict:
         if creator_status == "creator_close":
             flags.append("DEV_CLOSED")
 
+    # --- analisa token lengkap GMGN ---
+    tags = info.get("wallet_tags_stat") if isinstance(info.get("wallet_tags_stat"), dict) else {}
+    price = info.get("price") if isinstance(info.get("price"), dict) else {}
+    pool = info.get("pool") if isinstance(info.get("pool"), dict) else {}
+    link = info.get("link") if isinstance(info.get("link"), dict) else {}
+
+    def _n(v, default=0):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    smart_n = int(tags.get("smart_wallets") or 0)
+    sniper_n = int(tags.get("sniper_wallets") or 0)
+    bundler_n = int(tags.get("bundler_wallets") or 0)
+    fresh_n = int(tags.get("fresh_wallets") or 0)
+    renowned_n = int(tags.get("renowned_wallets") or 0)
+    whale_n = int(tags.get("whale_wallets") or 0)
+    rat_n = int(tags.get("rat_trader_wallets") or 0)
+
+    bundler_rate = _n(stat.get("top_bundler_trader_percentage") or stat.get("bot_degen_rate"))
+    if bundler_rate <= 1:
+        bundler_rate *= 100
+    rat_rate = _n(stat.get("top_rat_trader_percentage"))
+    if rat_rate <= 1:
+        rat_rate *= 100
+    fresh_rate = _n(stat.get("fresh_wallet_rate"))
+    if fresh_rate <= 1:
+        fresh_rate *= 100
+
+    liq_g = _n(info.get("liquidity") or pool.get("liquidity"))
+    holders_g = int(info.get("holder_count") or stat.get("holder_count") or 0)
+    if holders_g and not row.get("holder_count"):
+        row["holder_count"] = holders_g
+    if liq_g and (not row.get("liquidity_usd") or float(row.get("liquidity_usd") or 0) <= 0):
+        row["liquidity_usd"] = round(liq_g, 2)
+
+    # price changes GMGN windows
+    def _pct_chg(cur, old):
+        try:
+            c, o = float(cur), float(old)
+            if o == 0:
+                return None
+            return round((c / o - 1) * 100, 2)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    p_now = price.get("price")
+    gmgn_chg = {
+        "m1": _pct_chg(p_now, price.get("price_1m")),
+        "m5": _pct_chg(p_now, price.get("price_5m")),
+        "h1": _pct_chg(p_now, price.get("price_1h")),
+        "h6": _pct_chg(p_now, price.get("price_6h")),
+        "h24": _pct_chg(p_now, price.get("price_24h")),
+    }
+    buys_24 = int(_n(price.get("buys_24h")))
+    sells_24 = int(_n(price.get("sells_24h")))
+
+    renounced_mint = sec.get("renounced_mint")
+    renounced_freeze = sec.get("renounced_freeze_account")
+    launchpad = info.get("launchpad") or info.get("launchpad_platform") or ""
+    launch_progress = info.get("launchpad_progress")
+
+    # skor analisa GMGN 0-100
+    score = 50
+    notes = []
+    if burn_status in ("burn", "burned") or burn_ratio >= 0.9 or blackhole:
+        score += 12
+        notes.append("LP/token burned")
+    elif is_locked:
+        score += 6
+        notes.append("LP locked")
+    else:
+        score -= 8
+        notes.append("LP unlocked")
+    if creator_status == "creator_close":
+        score += 10
+        notes.append("dev closed")
+    elif creator_status == "creator_hold":
+        score -= 10
+        notes.append("dev holding")
+    if created_count >= 8:
+        score -= 20
+        notes.append("serial deployer")
+    elif created_count >= 3:
+        score -= 8
+        notes.append("multi deploy")
+    if smart_n >= 10:
+        score += 10
+        notes.append(f"{smart_n} smart")
+    elif smart_n >= 3:
+        score += 5
+    if renowned_n >= 3:
+        score += 5
+        notes.append(f"{renowned_n} KOL")
+    if sniper_n >= 30:
+        score -= 10
+        notes.append("banyak sniper")
+    if bundler_rate >= 25 or bundler_n >= 50:
+        score -= 12
+        notes.append("bundler tinggi")
+    if rat_rate >= 15 or rat_n >= 20:
+        score -= 10
+        notes.append("rat trader")
+    if fresh_rate >= 40:
+        score -= 6
+        notes.append("fresh wallet tinggi")
+    if renounced_mint is True:
+        score += 4
+    elif renounced_mint is False:
+        score -= 8
+        notes.append("mint belum renounce")
+    if renounced_freeze is False:
+        score -= 6
+        notes.append("freeze aktif")
+    if row.get("honeypot"):
+        score = min(score, 10)
+        notes.append("honeypot")
+    if avoid:
+        score = min(score, 25)
+    score = max(0, min(100, score))
+
+    if score >= 70 and not avoid and not row.get("honeypot"):
+        gmgn_verdict = "GMGN CLEAN"
+    elif score >= 45 and not avoid:
+        gmgn_verdict = "GMGN MIXED"
+    else:
+        gmgn_verdict = "GMGN RISKY"
+
+    row["gmgn_smart"] = smart_n
+    row["gmgn_sniper"] = sniper_n
+    row["gmgn_bundler"] = bundler_n
+    row["gmgn_fresh"] = fresh_n
+    row["gmgn_renowned"] = renowned_n
+    row["gmgn_whale"] = whale_n
+    row["gmgn_rat"] = rat_n
+    row["gmgn_bundler_rate"] = round(bundler_rate, 1)
+    row["gmgn_rat_rate"] = round(rat_rate, 1)
+    row["gmgn_fresh_rate"] = round(fresh_rate, 1)
+    row["gmgn_holders"] = holders_g
+    row["gmgn_liq"] = round(liq_g, 2) if liq_g else None
+    row["gmgn_launchpad"] = launchpad
+    row["gmgn_launch_progress"] = launch_progress
+    row["gmgn_renounced_mint"] = renounced_mint
+    row["gmgn_renounced_freeze"] = renounced_freeze
+    row["gmgn_chg"] = gmgn_chg
+    row["gmgn_buys_24h"] = buys_24
+    row["gmgn_sells_24h"] = sells_24
+    row["gmgn_score"] = score
+    row["gmgn_verdict"] = gmgn_verdict
+    row["gmgn_notes"] = notes
+    row["gmgn_twitter"] = link.get("twitter_username") or ""
+    row["gmgn_website"] = link.get("website") or ""
+    row["gmgn_telegram"] = link.get("telegram") or ""
+    row["gmgn_report"] = {
+        "score": score,
+        "verdict": gmgn_verdict,
+        "notes": notes,
+        "smart": smart_n,
+        "sniper": sniper_n,
+        "bundler": bundler_n,
+        "fresh": fresh_n,
+        "renowned": renowned_n,
+        "whale": whale_n,
+        "rat": rat_n,
+        "bundler_rate": round(bundler_rate, 1),
+        "rat_rate": round(rat_rate, 1),
+        "fresh_rate": round(fresh_rate, 1),
+        "holders": holders_g,
+        "liquidity": round(liq_g, 2) if liq_g else None,
+        "launchpad": launchpad,
+        "renounced_mint": renounced_mint,
+        "renounced_freeze": renounced_freeze,
+        "creator_status": creator_status,
+        "creator_hold_pct": round(creator_hold, 2),
+        "creator_created": created_count,
+        "burn_ratio": burn_ratio,
+        "lp_locked": is_locked,
+        "chg": gmgn_chg,
+        "buys_24h": buys_24,
+        "sells_24h": sells_24,
+        "avoid": avoid,
+        "avoid_reason": row.get("gmgn_avoid_reason") or "",
+    }
+
     row["flags"] = flags
     row["sec_provider"] = (row.get("sec_provider") or "") + "+gmgn"
     row["mechanics_note"] = (
-        f"GMGN burn={sec.get('burn_status')} ratio={burn_ratio} · "
-        f"lock={is_locked} · dev={creator_status or '-'} created={created_count}"
+        f"GMGN {gmgn_verdict} skor {score} · burn={sec.get('burn_status')} · "
+        f"smart={smart_n} sniper={sniper_n} · dev={creator_status or '-'} created={created_count}"
     )
     return row
 
@@ -3266,17 +3451,50 @@ def analisa_id(row: Dict) -> str:
     lines.append("──────────────")
     if row.get("gmgn_ok"):
         cstat = row.get("gmgn_creator_status") or "-"
+        gv = row.get("gmgn_verdict") or "GMGN"
+        gs = row.get("gmgn_score")
+        lines.append(f"🦞 <b>GMGN</b>  {gv}" + (f" · skor <b>{gs}</b>/100" if gs is not None else ""))
         lines.append(
-            f"🦞 GMGN  LP/Burn ok · Dev <b>{cstat}</b> · "
-            f"hold {row.get('gmgn_creator_hold_pct') or 0}% · "
-            f"created {row.get('gmgn_creator_created_count') or 0}"
+            f"   Smart {row.get('gmgn_smart') or 0} · KOL {row.get('gmgn_renowned') or 0} · "
+            f"Sniper {row.get('gmgn_sniper') or 0} · Bundler {row.get('gmgn_bundler') or 0} · "
+            f"Fresh {row.get('gmgn_fresh') or 0}"
         )
+        chg = row.get("gmgn_chg") or {}
+        chg_bits = []
+        for k, lab in (("m5", "5m"), ("h1", "1h"), ("h6", "6h"), ("h24", "24h")):
+            v = chg.get(k)
+            if v is not None:
+                chg_bits.append(f"{lab} {v:+.1f}%")
+        if chg_bits:
+            lines.append("   Δ " + " · ".join(chg_bits))
+        buys, sells = row.get("gmgn_buys_24h"), row.get("gmgn_sells_24h")
+        if buys or sells:
+            lines.append(f"   Tx 24h buy {buys or 0} / sell {sells or 0}")
+        lines.append(
+            f"   Dev <b>{cstat}</b> · hold {row.get('gmgn_creator_hold_pct') or 0}% · "
+            f"created {row.get('gmgn_creator_created_count') or 0}"
+            + (f" · {row.get('gmgn_launchpad')}" if row.get("gmgn_launchpad") else "")
+        )
+        ren_m, ren_f = row.get("gmgn_renounced_mint"), row.get("gmgn_renounced_freeze")
+        ren_s = []
+        if ren_m is True:
+            ren_s.append("mint✅")
+        elif ren_m is False:
+            ren_s.append("mint❌")
+        if ren_f is True:
+            ren_s.append("freeze✅")
+        elif ren_f is False:
+            ren_s.append("freeze❌")
+        if ren_s:
+            lines.append("   " + " · ".join(ren_s))
+        if row.get("gmgn_notes"):
+            lines.append("   " + " · ".join(str(x) for x in (row.get("gmgn_notes") or [])[:5]))
         if row.get("gmgn_avoid"):
             lines.append(f"🚨 <b>HINDARI</b> {row.get('gmgn_avoid_reason') or 'dev rug'}")
         elif cstat == "creator_close":
             lines.append("✅ Dev sudah close alokasi")
         if row.get("gmgn_creator"):
-            lines.append(f"Dev <code>{row.get('gmgn_creator')}</code>")
+            lines.append(f"   <code>{row.get('gmgn_creator')}</code>")
     elif row.get("gmgn_error"):
         lines.append(f"🦞 GMGN  ⚠️ {_esc(str(row.get('gmgn_error'))[:80])}")
     else:
