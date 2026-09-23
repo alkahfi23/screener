@@ -1600,7 +1600,10 @@ def apply_cmc_mechanics(row: Dict) -> Dict:
 
 
 # ---------- GMGN OpenAPI (burn / LP / dev rug) https://openapi.gmgn.ai ----------
-GMGN_API_KEY = os.getenv("GMGN_API_KEY", "gmgn_basesolbscethmonadtron").strip()
+GMGN_DEFAULT_KEY = "gmgn_basesolbscethmonadtron"
+# Render sering set GMGN_API_KEY="" → override default jadi kosong → 401
+_raw_gmgn = os.getenv("GMGN_API_KEY")
+GMGN_API_KEY = (_raw_gmgn if _raw_gmgn is not None else GMGN_DEFAULT_KEY).strip() or GMGN_DEFAULT_KEY
 GMGN_HOST = os.getenv("GMGN_API_BASE", "https://openapi.gmgn.ai").rstrip("/")
 GMGN_CHAIN = {
     "solana": "sol",
@@ -1614,8 +1617,8 @@ GMGN_CHAIN = {
 
 
 def gmgn_get(path: str, params: Dict) -> Dict:
-    if not GMGN_API_KEY:
-        return {"error": "GMGN_API_KEY kosong"}
+    """GET openapi.gmgn.ai — 401 = key kosong/salah (AUTH_INVALID / AUTH_KEY_INVALID)."""
+    key = GMGN_API_KEY or GMGN_DEFAULT_KEY
     try:
         import uuid
         q = dict(params or {})
@@ -1624,13 +1627,35 @@ def gmgn_get(path: str, params: Dict) -> Dict:
         r = SESSION.get(
             f"{GMGN_HOST}{path}",
             params=q,
-            headers={"X-APIKEY": GMGN_API_KEY, "Accept": "application/json"},
+            headers={"X-APIKEY": key, "Accept": "application/json"},
             timeout=15,
         )
+        if r.status_code == 401:
+            # fallback key publik read-only
+            if key != GMGN_DEFAULT_KEY:
+                q["timestamp"] = int(time.time())
+                q["client_id"] = str(uuid.uuid4())
+                r = SESSION.get(
+                    f"{GMGN_HOST}{path}",
+                    params=q,
+                    headers={"X-APIKEY": GMGN_DEFAULT_KEY, "Accept": "application/json"},
+                    timeout=15,
+                )
+            if r.status_code == 401:
+                try:
+                    err = r.json()
+                except Exception:
+                    err = {}
+                return {
+                    "error": f"401 {err.get('error') or err.get('message') or 'AUTH'} — set GMGN_API_KEY di Render (jangan kosong)",
+                }
         if not r.ok:
             return {"error": f"HTTP {r.status_code}", "body": r.text[:180]}
         data = r.json()
         if isinstance(data, dict) and data.get("code") not in (0, None, "0"):
+            code = data.get("code")
+            if code in (401, "401"):
+                return {"error": f"401 {data.get('message') or data.get('error') or 'auth'}"}
             return {"error": data.get("message") or data.get("reason") or "gmgn error", "raw": data}
         if isinstance(data, dict) and "data" in data:
             return data.get("data") or {}
@@ -3151,6 +3176,7 @@ def holder_block(row: Dict) -> Tuple[list, bool, float]:
 
 
 def analisa_id(row: Dict) -> str:
+    """Pesan Telegram analisa CA — format rapi, padat."""
     rpt = row.get("ca_report") or {}
     tw = str(rpt.get("trend_window") or "WATCH")
     health = rpt.get("health_score")
@@ -3161,154 +3187,106 @@ def analisa_id(row: Dict) -> str:
     risk = str(row.get("risk") or "-")
     upside = str(row.get("upside") or "-")
     h_lines, dominan, top1 = holder_block(row)
-    if honey or tw == "AVOID" or risk in ("HONEYPOT", "HIGH"):
-        sig, sig_ico, putusan = "JANGAN BELI", "🛑", "Honeypot / risiko tinggi / window mati"
+
+    if honey or risk in ("HONEYPOT",) or row.get("gmgn_avoid"):
+        sig, sig_ico, putusan = "JANGAN BELI", "🛑", row.get("gmgn_avoid_reason") or "Honeypot / dev rug risk"
+        stars_n = 1
+    elif risk == "HIGH" or tw == "AVOID":
+        sig, sig_ico, putusan = "JANGAN BELI", "🛑", "Risiko tinggi / window mati"
         stars_n = 1
     elif dominan and top1 >= 20:
-        sig, sig_ico, putusan = "JANGAN BELI", "🚨", f"Holder dominan {top1:.1f}% — mudah di-dump"
+        sig, sig_ico, putusan = "JANGAN BELI", "🚨", f"Holder dominan {top1:.1f}%"
         stars_n = 1
     elif not early or tw == "UNLIKELY" or upside in ("WASHY", "THIN", "NO UPSIDE"):
-        sig, sig_ico, putusan = "JANGAN BELI", "🚫", "Bukan setup early — wash atau sudah telat"
+        sig, sig_ico, putusan = "JANGAN BELI", "🚫", "Bukan setup early"
         stars_n = 2
     elif dominan:
-        sig, sig_ico, putusan = "JANGAN KEJAR", "🚨", f"Top holder {top1:.1f}% ≥10% — risiko konsentrasi"
+        sig, sig_ico, putusan = "JANGAN KEJAR", "🚨", f"Top1 {top1:.1f}% ≥10%"
         stars_n = 2
     elif tw == "POSSIBLE" and early and tape.startswith("BUY"):
-        sig, sig_ico, putusan = "BELI SPEKULATIF", "🟢", "Lolos filter early + tape beli + holder waras. Size kecil."
+        sig, sig_ico, putusan = "BELI SPEKULATIF", "🟢", "Early + tape beli · size kecil"
         stars_n = 5 if (aman or 0) >= 70 and (health or 0) >= 75 else 4
     elif tw == "POSSIBLE" and early:
-        sig, sig_ico, putusan = "PANTAU DULU", "🟡", "Struktur early oke, tape belum jelas"
+        sig, sig_ico, putusan = "PANTAU DULU", "🟡", "Early oke, tape belum jelas"
         stars_n = 3
     else:
-        sig, sig_ico, putusan = "JANGAN KEJAR", "⚠️", "Ada ramai, belum cukup untuk masuk"
+        sig, sig_ico, putusan = "JANGAN KEJAR", "⚠️", "Belum cukup untuk masuk"
         stars_n = 2
+
     stars = "⭐" * stars_n + "☆" * (5 - stars_n)
     chg = float(row.get("price_change_24h") or 0)
     chg_ico = "📈" if chg >= 0 else "📉"
-    honey_txt = "🍯 HONEYPOT" if honey else "✅ bukan honeypot"
-    risk_ico = "🟢" if risk == "LOW" else ("🔴" if risk == "HIGH" else "⚪")
+    risk_ico = "🟢" if risk == "LOW" else ("🔴" if risk in ("HIGH", "HONEYPOT") else "⚪")
     win_ico = {"POSSIBLE": "🟢", "WATCH": "🟡", "UNLIKELY": "🔴", "AVOID": "🛑"}.get(tw, "⚪")
     name = row.get("name") or ""
+    age = row.get("age_hours")
+    age_s = f"{float(age):.1f}j" if age is not None else "-"
+    vl = rpt.get("vol_liq")
+    vl_s = f"{float(vl):.2f}x" if vl not in (None, "") else "-"
+
     lines = [
-        f"{sig_ico} <b>SIGNAL {sig}</b>",
-        f"{stars}  <b>{stars_n}/5</b>",
+        f"{sig_ico} <b>{sig}</b>  {stars} <b>{stars_n}/5</b>",
         f"<i>{putusan}</i>",
         "",
-        f"💎 <b>${row.get('symbol') or '-'}</b>  {name}",
+        f"💎 <b>${row.get('symbol') or '-'}</b>" + (f" · {name}" if name else ""),
         f"⛓️ {str(row.get('chain') or '').upper()} · {row.get('dex') or '-'}",
-        "━━━━━━━━━━━━━━",
-        f"{win_ico} Window     <b>{tw}</b>",
-        f"{tape_ico} Tape       <b>{tape}</b>",
-        f"{risk_ico} Risk       <b>{risk}</b>",
-        f"🎯 Upside     <b>{upside}</b>",
-        f"🧪 {honey_txt}",
-        f"📊 Tape {health if health is not None else '-'} · Aman {aman if aman is not None else '-'}",
-        "━━━━━━━━━━━━━━",
-        f"💧 Liq     {_usd(row.get('liquidity_usd'))}",
-        f"🏦 MCap    {_usd(row.get('market_cap'))}",
-        f"📦 Vol     {_usd(row.get('volume_24h'))}",
-        f"{chg_ico} 24h     {chg:+.1f}%",
-        f"⏱️ Umur    {row.get('age_hours') or '-'} jam",
-        f"📐 Vol/Liq {rpt.get('vol_liq') or '-'}",
-        f"🔒 LP {row.get('lp_status') or '-'} · 🔥 {row.get('burn_status') or '-'}",
+        "──────────────",
+        f"{win_ico} Window  <b>{tw}</b>   {tape_ico} Tape <b>{tape}</b>",
+        f"{risk_ico} Risk  <b>{risk}</b>   🎯 <b>{upside}</b>",
+        f"{'🍯 HONEYPOT' if honey else '✅ Bukan honeypot'} · Tape {health if health is not None else '-'} · Aman {aman if aman is not None else '-'}",
+        "──────────────",
+        f"💧 {_usd(row.get('liquidity_usd'))}  ·  🏦 {_usd(row.get('market_cap'))}  ·  📦 {_usd(row.get('volume_24h'))}",
+        f"{chg_ico} 24h {chg:+.1f}%  ·  ⏱ {age_s}  ·  📐 {vl_s}",
+        f"🔒 {row.get('lp_status') or 'LP ?'}  ·  🔥 {row.get('burn_status') or 'Burn ?'}  ·  ♻️ {row.get('buyback_status') or 'Buyback ?'}",
     ]
     lines.extend(h_lines)
-    # ---- gabungan Yodao + FOMO ----
-    yodao_on = bool(row.get("yodao_ok"))
-    fomo_on = bool(row.get("fomo_smart_holders")) or bool(row.get("fomo_board"))
-    lines.append("━━━━━━━━━━━━━━")
-    lines.append("🧩 <b>SUMBER GABUNGAN</b>")
+
+    # sumber ringkas
+    lines.append("──────────────")
     if row.get("gmgn_ok"):
-        lines.append("🦞 <b>GMGN</b> (burn / LP / token dev)")
-        lines.append(f"· LP {row.get('lp_status') or '-'} · Burn {row.get('burn_status') or '-'}")
-        lines.append(f"· Buyback {row.get('buyback_status') or '-'}")
+        cstat = row.get("gmgn_creator_status") or "-"
         lines.append(
-            f"· Dev status <b>{row.get('gmgn_creator_status') or '-'}</b> · "
+            f"🦞 GMGN  LP/Burn ok · Dev <b>{cstat}</b> · "
             f"hold {row.get('gmgn_creator_hold_pct') or 0}% · "
-            f"created {row.get('gmgn_creator_created_count') or 0} token"
+            f"created {row.get('gmgn_creator_created_count') or 0}"
         )
-        if row.get("gmgn_creator"):
-            lines.append(f"· Creator <code>{row.get('gmgn_creator')}</code>")
-        if row.get("gmgn_rug_ratio") is not None:
-            lines.append(f"· Rug ratio {row.get('gmgn_rug_ratio')}")
         if row.get("gmgn_avoid"):
-            lines.append(f"· 🚨 <b>HINDARI</b>: {row.get('gmgn_avoid_reason') or 'dev rug risk'}")
-        elif row.get("gmgn_creator_status") == "creator_close":
-            lines.append("· ✅ dev sudah close/jual alokasi")
+            lines.append(f"🚨 <b>HINDARI</b> {row.get('gmgn_avoid_reason') or 'dev rug'}")
+        elif cstat == "creator_close":
+            lines.append("✅ Dev sudah close alokasi")
+        if row.get("gmgn_creator"):
+            lines.append(f"Dev <code>{row.get('gmgn_creator')}</code>")
+    elif row.get("gmgn_error"):
+        lines.append(f"🦞 GMGN  ⚠️ {_esc(str(row.get('gmgn_error'))[:80])}")
     else:
-        lines.append(f"🦞 GMGN: {row.get('gmgn_error') or 'tidak ada data / chain tidak support'}")
-    if yodao_on:
-        dev = float(row.get("yodao_dev_holding") or 0)
-        sn = float(row.get("yodao_snipers") or 0)
-        ins = float(row.get("yodao_insiders") or 0)
-        bun = float(row.get("yodao_bundle") or 0)
-        fr = float(row.get("yodao_fresh") or 0)
-        pc = float(row.get("yodao_pct_completion") or 0)
-        tb = float(row.get("yodao_tx_buy") or 0)
-        ts = float(row.get("yodao_tx_sell") or 0)
-        lines.append("🚀 <b>Yodao</b> (pump / on-chain early)")
-        lines.append(f"· Bonding {pc:.0f}% · buy/sell tx {tb:.0f}/{ts:.0f}")
-        lines.append(f"· Dev {dev:.1f}% · Sniper {sn:.1f}% · Insider {ins:.1f}%")
-        lines.append(f"· Bundle {bun:.1f}% · Fresh wallet {fr:.1f}%")
-        warns = []
-        if dev >= 10:
-            warns.append("dev tinggi")
-        if sn >= 15:
-            warns.append("sniper tinggi")
-        if ins >= 10:
-            warns.append("insider")
-        if bun >= 15:
-            warns.append("bundle")
-        if fr >= 25:
-            warns.append("fresh wallet")
-        if warns:
-            lines.append("· ⚠️ " + ", ".join(warns))
-        else:
-            lines.append("· ✅ distribusi early relatif bersih")
-    else:
-        lines.append("🚀 Yodao: tidak ada data (bukan Solana / API kosong)")
+        lines.append("🦞 GMGN  — (chain tidak support / kosong)")
+
+    if row.get("yodao_ok") or row.get("yodao_dev_holding") is not None:
+        lines.append(
+            f"🚀 Yodao  bond {float(row.get('yodao_pct_completion') or 0):.0f}% · "
+            f"dev {float(row.get('yodao_dev_holding') or 0):.1f}% · "
+            f"sniper {float(row.get('yodao_snipers') or 0):.1f}% · "
+            f"fresh {float(row.get('yodao_fresh') or 0):.1f}%"
+        )
     sm = row.get("fomo_smart_holders") or []
     if sm or row.get("fomo_board"):
-        lines.append("🔥 <b>FOMO</b> (smart money sosial)")
-        if row.get("fomo_board"):
-            lines.append(f"· Board <b>{row.get('fomo_board')}</b> rank #{row.get('fomo_rank') or '-'}")
-        n = row.get("fomo_smart_count") or len(sm)
-        val = row.get("fomo_smart_value_usd")
-        lines.append(f"· Smart holders: <b>{n}</b>" + (f" · nilai ~{_usd(val)}" if val else ""))
-        for h in sm[:5]:
+        board = f" · {row.get('fomo_board')}#{row.get('fomo_rank')}" if row.get("fomo_board") else ""
+        lines.append(f"🔥 FOMO  {row.get('fomo_smart_count') or len(sm)} smart{board}")
+        for h in sm[:3]:
             handle = h.get("handle") or "?"
             v = h.get("valueUsd")
-            val_s = f" · {_usd(v)}" if v not in (None, "") else ""
-            lines.append(f"· @{handle}{val_s}")
-        if n >= 3:
-            lines.append("· ✅ ada crowd FOMO yang pegang")
-        elif n == 0:
-            lines.append("· ⚪ belum ada smart FOMO terdeteksi")
-    else:
-        if not FOMO_API_KEY:
-            lines.append("🔥 FOMO: set FOMO_API_KEY di Render")
-        else:
-            lines.append("🔥 FOMO: tidak ada smart holder / board")
-    # ringkas bias gabungan
-    bias = []
-    if yodao_on:
-        if float(row.get("yodao_snipers") or 0) < 15 and float(row.get("yodao_dev_holding") or 0) < 10:
-            bias.append("Yodao bersih")
-        else:
-            bias.append("Yodao berisiko")
-    if sm:
-        bias.append(f"FOMO {len(sm)} smart")
-    if bias:
-        lines.append(f"📎 Bias: {' · '.join(bias)}")
-    lines.append("━━━━━━━━━━━━━━")
-    lines.append("CA")
+            lines.append(f"   @{handle}" + (f" · {_usd(v)}" if v not in (None, "") else ""))
+
+    lines.append("──────────────")
     lines.append(f"<code>{row.get('token_address') or '-'}</code>")
+    foot = []
     if row.get("url"):
-        lines.append(f'📉 <a href="{row["url"]}">Chart DexScreener</a>')
+        foot.append(f'<a href="{row["url"]}">DexScreener</a>')
     if row.get("fomo_url"):
-        lines.append(f'⚡️ <a href="{row["fomo_url"]}">Trade FOMO</a>')
-    lines.append("")
-    lines.append("⚠️ Gabungan Dex+Yodao+FOMO. Bukan jaminan untung.")
+        foot.append(f'<a href="{row["fomo_url"]}">FOMO</a>')
+    if foot:
+        lines.append(" · ".join(foot))
+    lines.append("<i>⚠️ Bukan saran finansial · DYOR</i>")
     return "\n".join(lines)
 
 
@@ -3551,22 +3529,18 @@ def format_alert(row: Dict) -> str:
 
     chart = f'<a href="{_esc(link)}">DexScreener</a>' if link else "—"
     body = (
-        f"🟢 <b>GREEN GEM</b> · SIGNAL BELI SPEKULATIF\n"
-        f"⭐⭐⭐⭐☆  4/5\n"
+        f"🟢 <b>GREEN GEM</b> · BELI SPEKULATIF  ⭐⭐⭐⭐☆\n"
         f"{header}\n"
         f"{chain} · {dex}\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"Score        <b>{row.get('score')}</b>\n"
-        f"Confidence   <b>{row.get('confidence')}</b>\n"
-        f"Risk         <b>{_esc(row.get('risk'))}</b>\n"
-        f"Upside       <b>{_esc(row.get('upside'))}</b>\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"Liq     {_usd(row.get('liquidity_usd'))}\n"
-        f"MCap    {_usd(row.get('market_cap'))}\n"
-        f"Vol     {_usd(row.get('volume_24h'))}\n"
-        f"24h     {ch}\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"CA\n<code>{addr}</code>\n"
+        f"──────────────\n"
+        f"Score <b>{row.get('score')}</b> · Conf <b>{row.get('confidence')}</b>\n"
+        f"Risk <b>{_esc(row.get('risk'))}</b> · Upside <b>{_esc(row.get('upside'))}</b>\n"
+        f"🔒 {_esc(row.get('lp_status') or '-')} · 🔥 {_esc(row.get('burn_status') or '-')}\n"
+        f"──────────────\n"
+        f"💧 {_usd(row.get('liquidity_usd'))} · 🏦 {_usd(row.get('market_cap'))} · 📦 {_usd(row.get('volume_24h'))}\n"
+        f"📈 24h {ch}\n"
+        f"──────────────\n"
+        f"<code>{addr}</code>\n"
     )
     creator = _esc(row.get("creator") or "")
     if creator:
