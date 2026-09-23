@@ -1101,15 +1101,66 @@ def check_goplus_evm(chain: str, address: str) -> Dict:
         flags.append("HIGH_TAX")
     honeypot = "HONEYPOT" in flags or "CANNOT_SELL_ALL" in flags
     risk = "HONEYPOT" if honeypot else ("HIGH" if flags else "LOW")
+
+    # Burn dari holder dead/blackhole (penting untuk Robinhood & EVM lain)
+    dead = {
+        "0x000000000000000000000000000000000000dead",
+        "0x0000000000000000000000000000000000000000",
+        "0x0000000000000000000000000000000000000001",
+        "0x000000000000000000000000000000000000dEaD".lower(),
+    }
+    burn_pct = 0.0
+    for h in info.get("holders") or []:
+        if not isinstance(h, dict):
+            continue
+        ha = str(h.get("address") or "").lower()
+        try:
+            pct = float(h.get("percent") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if pct <= 1.0:
+            pct *= 100.0
+        if ha in dead or "dead" in ha or ha.endswith("dead"):
+            burn_pct += pct
+        # locked holder sering LP lock contract
+        if _truthy(h.get("is_locked")) and ha not in dead:
+            pass
+    # LP holders locked
+    lp_locked_pct = 0.0
+    for h in info.get("lp_holders") or []:
+        if not isinstance(h, dict):
+            continue
+        try:
+            pct = float(h.get("percent") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if pct <= 1.0:
+            pct *= 100.0
+        if _truthy(h.get("is_locked")) or str(h.get("tag") or "").lower() in ("blackhole", "burn", "dead"):
+            lp_locked_pct += pct
+
+    try:
+        creator_pct = float(info.get("creator_percent") or 0)
+        if creator_pct <= 1:
+            creator_pct *= 100
+    except (TypeError, ValueError):
+        creator_pct = 0.0
+
     return {
-        "provider": "goplus",
+        "provider": "goplus" + (f"-{chain.lower()}" if chain else ""),
         "honeypot": honeypot,
         "risk": risk,
         "flags": flags,
         "buy_tax": buy_tax,
         "sell_tax": sell_tax,
         "owner": info.get("owner_address") or "",
+        "creator": info.get("creator_address") or "",
+        "creator_percent": round(creator_pct, 2),
         "lp_holders": info.get("lp_holder_count"),
+        "burn_pct": round(burn_pct, 2),
+        "lp_locked_pct": round(lp_locked_pct, 2),
+        "holder_count": int(info.get("holder_count") or 0) if str(info.get("holder_count") or "").isdigit() or isinstance(info.get("holder_count"), int) else 0,
+        "is_open_source": info.get("is_open_source"),
     }
 
 
@@ -1368,6 +1419,8 @@ CMC_PLATFORM = {
     "avalanche": "Avalanche",
     "polygon": "Polygon",
     "optimism": "Optimism",
+    "robinhood": "Robinhood",
+    "arc": "Arc",
 }
 
 
@@ -1765,25 +1818,40 @@ def detect_mechanics(row: Dict) -> Dict:
         " ".join(str((s or {}).get("url") or "") for s in (row.get("socials") or [])),
         flags,
     ]).lower()
+    chain_l = str(row.get("chain") or "").lower()
     lp = row.get("lp_locked")
-    lp_pct = float(row.get("lp_locked_pct") or 0)
-    if lp is True or lp_pct >= 90 or "lp burned" in flags or "liquidity burned" in flags:
+    lp_pct = float(row.get("lp_locked_pct") or row.get("goplus_lp_locked_pct") or 0)
+    if lp is True or lp_pct >= 50 or "lp burned" in flags or "liquidity burned" in flags:
         lp_status = "LP BURN / LOCK"
-    elif lp is False:
+    elif lp is False and lp_pct <= 0:
         lp_status = "LP UNLOCKED"
     else:
         lp_status = "LP UNKNOWN"
     burn = "TOKEN BURN CLAIM" if any(k in blob for k in ("burn", "deflation", "dead wallet")) else "BURN UNKNOWN"
     if "cannot burn" in flags or "no burn" in blob:
         burn = "NO BURN"
+    # GoPlus dead-wallet burn (Robinhood + EVM)
+    try:
+        gp_burn = float(row.get("goplus_burn_pct") or 0)
+    except (TypeError, ValueError):
+        gp_burn = 0.0
+    if gp_burn >= 1:
+        burn = f"TOKEN BURN {gp_burn:.1f}% (GoPlus dead)"
+        if chain_l == "robinhood":
+            burn = f"TOKEN BURN {gp_burn:.1f}% (Robinhood/GoPlus)"
     onchain = row.get("burn_onchain")
     if isinstance(onchain, dict) and onchain.get("ok"):
         amt = float(onchain.get("burned_tokens") or 0)
-        burn = f"BURNED {amt:.2f}" if amt > 0 else "NO BURN ONCHAIN"
-    elif isinstance(onchain, dict) and onchain.get("reason"):
-        burn = "BURN UNKNOWN"
+        if amt > 0:
+            burn = f"BURNED {amt:.2f}"
+        elif gp_burn < 1:
+            burn = "NO BURN ONCHAIN"
     buyback = "BUYBACK CLAIM" if any(k in blob for k in ("buyback", "buy back", "buy-back", "repurchase")) else "BUYBACK UNKNOWN"
-    note = "LP RugCheck · burn Etherscan (EVM) · buyback teks · CMC di apply_cmc_mechanics"
+    # Robinhood: sering klaim di web/twitter
+    if chain_l == "robinhood" and buyback == "BUYBACK UNKNOWN":
+        if any(k in blob for k in ("buyback", "buy back", "revenue", "treasury")):
+            buyback = "BUYBACK CLAIM (Robinhood meta)"
+    note = "LP/burn: RugCheck·GoPlus·GMGN·CMC · Robinhood via GoPlus chain 4663"
     return {"lp_status": lp_status, "burn_status": burn, "buyback_status": buyback, "note": note}
 
 
@@ -1807,6 +1875,16 @@ def attach_security(rows: List[Dict]) -> List[Dict]:
         row["holder_count"] = sec.get("holder_count") or 0
         row["lp_locked"] = sec.get("lp_locked")
         row["lp_locked_pct"] = sec.get("lp_locked_pct")
+        # GoPlus burn/LP (termasuk Robinhood chain 4663)
+        if sec.get("burn_pct") is not None:
+            row["goplus_burn_pct"] = sec.get("burn_pct")
+        if sec.get("lp_locked_pct") is not None:
+            row["goplus_lp_locked_pct"] = sec.get("lp_locked_pct")
+            if float(sec.get("lp_locked_pct") or 0) >= 50:
+                row["lp_locked"] = True
+                row["lp_locked_pct"] = sec.get("lp_locked_pct")
+        if sec.get("creator") and not row.get("creator"):
+            row["creator"] = sec.get("creator")
         if "DOMINANT_HOLDER" in (sec.get("holder_flags") or []):
             row["flags"] = list(row.get("flags") or []) + ["DOMINANT_HOLDER"]
         mech = detect_mechanics(row)
