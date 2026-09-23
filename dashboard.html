@@ -98,6 +98,17 @@ th { color: #94a3b8; font-weight: 600; font-size: 12px; }
 .src-card h4 { margin: 0 0 10px; font-size: 14px; color: #38bdf8; }
 .src-card.yodao h4 { color: #a78bfa; }
 .src-card.fomo h4 { color: #fb923c; }
+.src-card.gmgn h4 { color: #34d399; }
+.src-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-top: 12px; }
+@media (max-width: 900px) { .src-grid-3 { grid-template-columns: 1fr; } }
+.gmgn-avoid {
+  margin-top: 10px; padding: 12px 14px; border-radius: 10px;
+  background: rgba(239,68,68,.12); border: 1px solid #7f1d1d; color: #fecaca; font-weight: 600;
+}
+.gmgn-ok {
+  margin-top: 10px; padding: 10px 14px; border-radius: 10px;
+  background: rgba(34,197,94,.1); border: 1px solid #14532d; color: #86efac; font-size: 13px;
+}
 .src-row { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #0f172a; }
 .src-row span { color: #94a3b8; }
 .src-row b { color: #e2e8f0; }
@@ -467,6 +478,7 @@ function renderCaDash(item) {
           <span class="badge ${twClass}">TREND ${tw}</span>
           <span class="badge ${upsideClass(item.upside)}">${item.upside || "-"}</span>
           <span class="badge ${flowStrength(item).tone === "buy" ? "safe" : flowStrength(item).tone === "sell" ? "danger" : "unknown"}">${flowStrength(item).label}</span>
+          ${item.gmgn_avoid ? `<span class="badge danger">🚨 DEV RUG RISK</span>` : (item.gmgn_ok && item.gmgn_creator_status === "creator_close" ? `<span class="badge safe">DEV CLOSED</span>` : (item.gmgn_ok ? `<span class="badge unknown">GMGN OK</span>` : ""))}
         </div>
       </div>
     </div>
@@ -518,6 +530,7 @@ function multiSourceHtml(item) {
   const yOn = !!item.yodao_ok || item.yodao_dev_holding != null || item.yodao_snipers != null;
   const sm = item.fomo_smart_holders || [];
   const fOn = sm.length > 0 || !!item.fomo_board;
+  const gOn = !!item.gmgn_ok;
   const dev = Number(item.yodao_dev_holding || 0);
   const sn = Number(item.yodao_snipers || 0);
   const ins = Number(item.yodao_insiders || 0);
@@ -556,15 +569,41 @@ function multiSourceHtml(item) {
     ${sm.length >= 3 ? `<div class="src-ok">✅ ada crowd FOMO yang pegang</div>` : (sm.length ? `<div class="muted" style="margin-top:8px;font-size:12px">Sedikit smart FOMO</div>` : "")}
   ` : `<p class="muted" style="margin:0">Tidak ada smart holder FOMO / set FOMO_API_KEY di server.</p>`;
 
+  const cStat = item.gmgn_creator_status || "-";
+  const cHold = Number(item.gmgn_creator_hold_pct || 0);
+  const cCnt = Number(item.gmgn_creator_created_count || 0);
+  const rug = item.gmgn_rug_ratio;
+  const gBody = gOn ? `
+    <div class="src-row"><span>LP</span><b>${item.lp_status || "-"}</b></div>
+    <div class="src-row"><span>Burn</span><b>${item.burn_status || "-"}</b></div>
+    <div class="src-row"><span>Buyback</span><b>${item.buyback_status || "-"}</b></div>
+    <div class="src-row"><span>Dev status</span><b style="color:${cStat==="creator_close"?"#4ade80":(cStat==="creator_hold"?"#f87171":"#e2e8f0")}">${cStat}</b></div>
+    <div class="src-row"><span>Dev hold</span><b style="color:${cHold>=8?"#f87171":"#e2e8f0"}">${cHold.toFixed(1)}%</b></div>
+    <div class="src-row"><span>Dev created</span><b style="color:${cCnt>=8?"#f87171":"#e2e8f0"}">${cCnt} token</b></div>
+    ${rug != null ? `<div class="src-row"><span>Rug ratio</span><b style="color:${Number(rug)>=0.3?"#f87171":"#4ade80"}">${Number(rug).toFixed(2)}</b></div>` : ""}
+    ${item.gmgn_creator ? `<div class="src-row"><span>Creator</span><b style="font-size:11px;word-break:break-all">${item.gmgn_creator}</b></div>` : ""}
+    ${item.gmgn_dev_ath_symbol ? `<div class="src-row"><span>Dev ATH coin</span><b>$${item.gmgn_dev_ath_symbol} · ${money(item.gmgn_dev_ath_mc)}</b></div>` : ""}
+  ` : `<p class="muted" style="margin:0">${item.gmgn_error || "GMGN kosong / chain tidak support (sol, bsc, base, eth)."}</p>`;
+
   const bias = [];
+  if (item.gmgn_avoid) bias.push("HINDARI dev rug");
+  else if (gOn && cStat === "creator_close") bias.push("GMGN dev close");
   if (yOn) bias.push(yWarn.length ? "Yodao berisiko" : "Yodao bersih");
   if (sm.length) bias.push("FOMO " + sm.length + " smart");
   if (item.fomo_board) bias.push("di board " + item.fomo_board);
 
+  const avoidBanner = item.gmgn_avoid
+    ? `<div class="gmgn-avoid">🚨 HINDARI — ${item.gmgn_avoid_reason || "dev serial / rug risk (GMGN)"}</div>`
+    : (gOn && cStat === "creator_close"
+      ? `<div class="gmgn-ok">✅ GMGN: dev sudah close/jual alokasi</div>`
+      : "");
+
   return `
   <div style="margin-top:8px">
-    <h3>🧩 Sumber gabungan · Yodao + FOMO</h3>
-    <div class="src-grid">
+    <h3>🧩 Sumber gabungan · GMGN + Yodao + FOMO</h3>
+    ${avoidBanner}
+    <div class="src-grid-3">
+      <div class="src-card gmgn"><h4>🦞 GMGN · burn / LP / token dev</h4>${gBody}</div>
       <div class="src-card yodao"><h4>🚀 Yodao · pump / on-chain early</h4>${yBody}</div>
       <div class="src-card fomo"><h4>🔥 FOMO · smart money sosial</h4>${fBody}</div>
     </div>
