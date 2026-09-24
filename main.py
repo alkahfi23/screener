@@ -3863,6 +3863,14 @@ def process_tg_update(upd: Dict) -> None:
         elif data == "stats":
             stats = refresh_signal_stats()
             send_telegram(format_stats_msg(stats), buttons=menu_buttons(), chat_id=str(chat))
+        elif data == "resetstats":
+            result = clear_signal_stats(0)
+            send_telegram(
+                f"🗑 Stats dihapus · cleared {result.get('cleared', 0)}\n"
+                "Mulai hitung ulang dari sinyal baru.",
+                buttons=menu_buttons(),
+                chat_id=str(chat),
+            )
         elif data.startswith("ca:"):
             handle_ca_message(data[3:], str(chat))
         return
@@ -3898,6 +3906,15 @@ def process_tg_update(upd: Dict) -> None:
     if text.startswith("/stats") or text.lower() in ("stats", "statistik", "winrate"):
         stats = refresh_signal_stats()
         send_telegram(format_stats_msg(stats), buttons=menu_buttons(), chat_id=str(chat))
+        return
+    if text.startswith("/resetstats") or text.lower() in ("resetstats", "clearstats", "hapus stats"):
+        result = clear_signal_stats(0)
+        send_telegram(
+            f"🗑 <b>Stats dihapus</b> · {result.get('cleared', 0)} sinyal lama dibuang.\n"
+            "Hitung ulang mulai dari alert berikutnya (code baru).",
+            buttons=menu_buttons(),
+            chat_id=str(chat),
+        )
         return
     if text.startswith("/donasi") or text.lower() in ("donasi", "donate"):
         send_telegram(donate_text(), buttons=donate_buttons(), chat_id=str(chat))
@@ -4139,6 +4156,19 @@ def save_signals(rows: List[Dict]) -> None:
     os.replace(tmp, SIGNAL_FILE)
 
 
+def clear_signal_stats(keep_hours: float = 0) -> Dict:
+    """Hapus statistik lama. keep_hours=0 → kosong total; >0 → sisakan sinyal lebih baru dari N jam."""
+    with SIGNAL_LOCK:
+        rows = load_signals()
+        if keep_hours <= 0:
+            save_signals([])
+            return {"ok": True, "cleared": len(rows), "kept": 0}
+        cutoff = time.time() - keep_hours * 3600
+        kept = [r for r in rows if float(r.get("ts") or 0) >= cutoff]
+        save_signals(kept)
+        return {"ok": True, "cleared": len(rows) - len(kept), "kept": len(kept)}
+
+
 def record_signal(row: Dict, source: str = "alert") -> None:
     px = _price_float(row.get("price_usd"))
     addr = (row.get("token_address") or "").strip()
@@ -4243,6 +4273,18 @@ def refresh_signal_stats() -> Dict:
     }
 
 
+@app.post("/stats/reset")
+@app.get("/stats/reset")
+def stats_reset(keep_hours: float = Query(0), secret: str = Query("")):
+    """Reset statistik sinyal. Opsional ?secret=TELEGRAM_HOOK_SECRET."""
+    expected = os.getenv("TELEGRAM_HOOK_SECRET", "")
+    if expected and secret != expected:
+        return {"ok": False, "error": "forbidden"}
+    result = clear_signal_stats(keep_hours=keep_hours)
+    result["stats"] = refresh_signal_stats()
+    return result
+
+
 def format_stats_msg(stats: Dict) -> str:
     total = stats.get("total") or 0
     win = stats.get("win") or 0
@@ -4278,15 +4320,65 @@ def format_stats_msg(stats: Dict) -> str:
     return "\n".join(lines)
 
 
+def enrich_for_ca_message(row: Dict) -> Dict:
+    """Lengkapi data seperti analisa CA manual sebelum kirim Telegram."""
+    try:
+        if not row.get("ca_report"):
+            row["ca_report"] = ca_analysis(row)
+    except Exception as e:
+        print("enrich ca_analysis:", e)
+    chain = str(row.get("chain") or "").lower()
+    try:
+        if chain in GMGN_CHAIN and not row.get("gmgn_ok") and not row.get("gmgn_error"):
+            apply_gmgn_enrich(row)
+    except Exception as e:
+        print("enrich gmgn:", e)
+    try:
+        if chain in ("solana", "sol") and not row.get("yodao_ok") and not row.get("yodao_dev_holding"):
+            # optional light — skip heavy yodao list fetch; scan_ca path handles full
+            pass
+    except Exception:
+        pass
+    try:
+        if FOMO_API_KEY and not (row.get("fomo_smart_holders") or row.get("fomo_board")):
+            apply_fomo_enrich(row)
+    except Exception as e:
+        print("enrich fomo:", e)
+    # holder fallback Solana jika kosong
+    try:
+        if chain in ("solana", "sol") and not row.get("top_holders"):
+            rpc = solana_rpc_top_holders(row.get("token_address") or "")
+            if rpc and rpc.get("top_holders"):
+                row["top_holders"] = rpc["top_holders"]
+                row["top10_pct"] = rpc.get("top10_pct") or row.get("top10_pct") or 0
+                row["top1_pct"] = rpc.get("top1_pct") or 0
+                row["top1_raw_pct"] = rpc.get("top1_raw_pct") or 0
+                row["holder_note"] = rpc.get("holder_note") or row.get("holder_note") or ""
+                row["sec_provider"] = (row.get("sec_provider") or "") + "+sol_rpc"
+    except Exception as e:
+        print("enrich sol rpc:", e)
+    row["fomo_url"] = fomo_url(row) if FOMO_API_KEY else row.get("fomo_url") or ""
+    row["url"] = row.get("url") or dex_url(row)
+    return row
+
+
 def notify_token(row: Dict) -> bool:
-    caption = format_alert(row)
+    """Alert otomatis = format sama analisa CA manual (analisa_id)."""
+    enrich_for_ca_message(row)
+    caption = analisa_id(row)
+    # jangan spam JANGAN ENTRY sebagai "green alert"
+    head = (caption.split("\n") or [""])[0].upper()
+    if "JANGAN ENTRY" in head:
+        print("skip alert JANGAN ENTRY:", row.get("symbol"))
+        return False
+    # tandai auto-alert di baris kedua
+    lines = caption.split("\n")
+    if lines:
+        lines.insert(1, "📡 <b>AUTO ALERT</b> · size kecil · DYOR")
+        caption = "\n".join(lines)
     buttons = tg_buttons(row)
-    icon = row.get("icon") or ""
-    ok = False
-    if icon and send_telegram_photo(icon, caption, buttons):
-        ok = True
-    else:
-        ok = send_telegram(caption, buttons=buttons)
+    # caption panjang → teks saja (hindari double photo+text)
+    ok = send_telegram(caption, buttons=buttons)
     if ok:
         try:
             record_signal(row, source="alert")
@@ -4304,13 +4396,29 @@ def run_alert_pass() -> Dict:
         sent = 0
         now = time.time()
         for row in rows:
-            # pastikan FOMO smart sudah di-enrich sebelum green check
             if FOMO_REQUIRE_SMART and FOMO_API_KEY and not has_fomo_smart_wallet(row):
                 try:
                     apply_fomo_enrich(row)
                 except Exception as e:
                     print("alert fomo enrich:", e)
             if not is_green_signal(row):
+                continue
+            # blok alert lemah: LP/burn unknown + holder kosong + sudah panas
+            enrich_for_ca_message(row)
+            upside = str(row.get("upside") or "").upper()
+            chg = float(row.get("price_change_24h") or 0)
+            age = row.get("age_hours")
+            lp_u = str(row.get("lp_status") or "").upper()
+            holders_empty = not row.get("top_holders") and float(row.get("top10_pct") or 0) <= 0
+            if upside in ("WASHY", "THIN", "NO UPSIDE"):
+                continue
+            if chg > 40:
+                continue
+            if age is not None and age > 36:
+                continue
+            if holders_empty and "UNKNOWN" in lp_u:
+                # Robinhood/data tipis — jangan auto green
+                print("skip thin data alert:", row.get("symbol"))
                 continue
             key = f"{row.get('chain')}:{(row.get('token_address') or '').lower()}"
             last = SENT_ALERTS.get(key, 0)
