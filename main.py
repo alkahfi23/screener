@@ -2065,6 +2065,88 @@ def detect_mechanics(row: Dict) -> Dict:
     return {"lp_status": lp_status, "burn_status": burn, "buyback_status": buyback, "note": note}
 
 
+# Solana public RPC + opsional Helius (gratis) untuk top holders
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
+SOLANA_RPC_URL = (
+    os.getenv("SOLANA_RPC_URL", "").strip()
+    or (f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}" if HELIUS_API_KEY else "")
+    or "https://api.mainnet-beta.solana.com"
+)
+
+
+def solana_rpc_top_holders(mint: str, limit: int = 20) -> Dict:
+    """
+    Top token accounts via getTokenLargestAccounts (gratis).
+    Catatan: address = token account, bukan selalu wallet owner.
+    """
+    mint = (mint or "").strip()
+    if not mint or len(mint) < 32:
+        return {}
+    try:
+        r = SESSION.post(
+            SOLANA_RPC_URL,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenLargestAccounts",
+                "params": [mint],
+            },
+            timeout=12,
+        )
+        if not r.ok:
+            return {"error": f"rpc HTTP {r.status_code}"}
+        data = r.json()
+        vals = ((data.get("result") or {}).get("value") or [])[:limit]
+        if not vals:
+            return {}
+        # total dari top accounts (perkiraan distribusi relatif)
+        total = 0.0
+        parsed = []
+        for v in vals:
+            try:
+                amt = float(v.get("uiAmount") or 0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            total += amt
+            parsed.append({
+                "address": v.get("address") or "",
+                "ui_amount": amt,
+                "amount": v.get("amount"),
+                "decimals": v.get("decimals"),
+            })
+        if total <= 0:
+            return {"top_holders": [], "holder_note": "rpc: balance 0"}
+        holders = []
+        for i, p in enumerate(parsed):
+            pct = (p["ui_amount"] / total) * 100.0
+            holders.append({
+                "address": p["address"],
+                "pct": round(pct, 2),
+                "insider": False,
+                "label": "token_account",
+            })
+        top1 = float(holders[0]["pct"]) if holders else 0.0
+        top10 = sum(float(h["pct"]) for h in holders[:10])
+        note = "Solana RPC top accounts (relatif antar top-20, bukan % supply penuh)"
+        out = {
+            "top_holders": holders[:8],
+            "top1_pct": round(top1, 2) if top1 < 10 else 0.0,  # hati-hati: relatif, jangan overflag
+            "top1_raw_pct": round(top1, 2),
+            "top10_pct": round(min(top10, 99.9), 2),
+            "holder_note": note,
+            "holder_count": len(holders),
+            "provider": "solana_rpc",
+        }
+        # flag dominan hanya jika sangat timpang di top list
+        if top1 >= 40:
+            out["top1_pct"] = round(top1, 2)
+            out["holder_flags"] = ["DOMINANT_HOLDER"]
+        return out
+    except Exception as e:
+        print("solana_rpc_top_holders:", e)
+        return {"error": str(e)}
+
+
 def attach_security(rows: List[Dict]) -> List[Dict]:
     for row in rows:
         sec = security_check(row.get("chain") or row.get("sector") or "", row.get("token_address") or "")
@@ -2085,6 +2167,26 @@ def attach_security(rows: List[Dict]) -> List[Dict]:
         row["holder_count"] = sec.get("holder_count") or 0
         row["lp_locked"] = sec.get("lp_locked")
         row["lp_locked_pct"] = sec.get("lp_locked_pct")
+        # Fallback holder Solana via RPC gratis kalau indexer kosong
+        chain = str(row.get("chain") or row.get("sector") or "").lower()
+        need_holders = (
+            chain in ("solana", "sol")
+            and not row.get("top_holders")
+            and float(row.get("top10_pct") or 0) <= 0
+        )
+        if need_holders and row.get("token_address"):
+            rpc = solana_rpc_top_holders(row["token_address"])
+            if rpc and not rpc.get("error") and rpc.get("top_holders"):
+                row["top_holders"] = rpc["top_holders"]
+                row["top10_pct"] = rpc.get("top10_pct") or 0
+                row["top1_pct"] = rpc.get("top1_pct") or 0
+                row["top1_raw_pct"] = rpc.get("top1_raw_pct") or 0
+                row["holder_note"] = rpc.get("holder_note") or ""
+                if not row.get("holder_count"):
+                    row["holder_count"] = rpc.get("holder_count") or 0
+                row["sec_provider"] = (row.get("sec_provider") or "") + "+sol_rpc"
+                if "DOMINANT_HOLDER" in (rpc.get("holder_flags") or []):
+                    row["flags"] = list(row.get("flags") or []) + ["DOMINANT_HOLDER"]
         # GoPlus burn/LP (termasuk Robinhood chain 4663)
         if sec.get("burn_pct") is not None:
             row["goplus_burn_pct"] = sec.get("burn_pct")
@@ -2207,13 +2309,17 @@ def group_best_by_token(pairs: List[Dict]) -> Dict[str, Dict]:
     return best
 
 
-FOMO_REQUIRE_SMART = os.getenv("FOMO_REQUIRE_SMART", "1") == "1"
+# Default OFF kalau FOMO_API_KEY kosong / habis kredit — scan tetap jalan pakai on-chain
+FOMO_REQUIRE_SMART = os.getenv("FOMO_REQUIRE_SMART", "0" if not FOMO_API_KEY else "1") == "1"
 FOMO_MIN_SMART = int(os.getenv("FOMO_MIN_SMART", "1"))
 
 
 def has_fomo_smart_wallet(row: Dict) -> bool:
-    """Lolos hanya jika ada smart wallet FOMO yang pegang (atau di board FOMO)."""
+    """Smart FOMO: hanya diwajibkan jika FOMO_REQUIRE_SMART=1 DAN key tersedia."""
     if not FOMO_REQUIRE_SMART:
+        return True
+    if not FOMO_API_KEY:
+        # key habis / belum set → jangan blokir discovery
         return True
     n = int(row.get("fomo_smart_count") or 0)
     if n >= FOMO_MIN_SMART:
@@ -2221,7 +2327,6 @@ def has_fomo_smart_wallet(row: Dict) -> bool:
     flags = " ".join(str(f).upper() for f in (row.get("flags") or []))
     if "FOMO_SMART_HOLDERS" in flags or "FOMO_CROWD_IN" in flags:
         return True
-    # board trending/graduated = sudah di radar FOMO traders
     if row.get("fomo_board") in ("trending", "graduated"):
         return True
     if row.get("source") == "fomo" and row.get("token_address"):
@@ -2325,7 +2430,7 @@ def scan_top(
                     seen_mints.add(mint)
         except Exception as fe:
             print("fomo merge discovery error:", fe)
-        # cek smart wallet FOMO (mahal credits → hanya top kandidat)
+        # FOMO smart: hanya jika key ada + REQUIRE=1 (skip total kalau key habis)
         if FOMO_REQUIRE_SMART and FOMO_API_KEY and mode != "aggressive":
             enriched = []
             for r in picked[:25]:
@@ -2339,9 +2444,7 @@ def scan_top(
                 if has_fomo_smart_wallet(r):
                     enriched.append(r)
             picked = enriched
-        elif FOMO_REQUIRE_SMART and not FOMO_API_KEY and mode != "aggressive":
-            # tanpa key: hanya yang source fomo (kosong) → discovery kosong, lebih aman
-            picked = [r for r in picked if has_fomo_smart_wallet(r)]
+        # tanpa FOMO_API_KEY: biarkan picked on-chain (RugCheck/GoPlus/GMGN/RPC)
         picked.sort(key=lambda x: (
             int(x.get("fomo_smart_count") or 0),
             x.get("confidence") or 0,
@@ -3062,10 +3165,9 @@ def is_green_signal(row: Dict) -> bool:
         return False
     if top10 >= 40:
         return False
-    # WAJIB: ada smart wallet FOMO
-    if FOMO_REQUIRE_SMART and not has_fomo_smart_wallet(row):
+    # FOMO smart hanya wajib jika key aktif + REQUIRE=1
+    if FOMO_REQUIRE_SMART and FOMO_API_KEY and not has_fomo_smart_wallet(row):
         return False
-    # hindari token yang dev-nya punya jejak rug / serial deployer (GMGN)
     if is_dev_rug_risk(row):
         return False
     return True
@@ -3230,8 +3332,14 @@ def send_five_star_candidates(chat_id: str) -> None:
 def send_fomo_candidates(chat_id: str) -> None:
     if not FOMO_API_KEY:
         send_telegram(
-            "🔥 <b>FOMO API</b>\nSet env <code>FOMO_API_KEY</code> di Render.\n"
-            "Ambil gratis: https://fomoapi.io/dashboard",
+            "🔥 <b>FOMO API off</b>\n"
+            "Key kosong / limit habis — tidak wajib.\n\n"
+            "Analisa tetap jalan lewat:\n"
+            "• 🦞 GMGN · smart/sniper/bundler\n"
+            "• 👥 RugCheck / GoPlus / Solana RPC holders\n"
+            "• 🚀 Yodao (Solana pump)\n\n"
+            "Pakai <b>⭐ Setup 5★</b> atau <b>🔍 Scan early</b>.\n"
+            "FOMO opsional: set <code>FOMO_API_KEY</code> di Render.",
             buttons=menu_buttons(),
             chat_id=chat_id,
         )
@@ -3240,11 +3348,18 @@ def send_fomo_candidates(chat_id: str) -> None:
     try:
         rows = fetch_fomo_boards(limit=10)
     except Exception as e:
-        send_telegram(f"FOMO gagal: {e}", buttons=menu_buttons(), chat_id=chat_id)
+        send_telegram(
+            f"🔥 FOMO gagal: {_esc(e)}\n"
+            "Lanjut pakai <b>Scan early</b> / <b>5★</b> (on-chain).",
+            buttons=menu_buttons(),
+            chat_id=chat_id,
+        )
         return
     if not rows:
         send_telegram(
-            "🔥 Board kosong / key credits habis / API error.",
+            "🔥 <b>FOMO board kosong</b>\n"
+            "Credits habis / tidak ada data.\n"
+            "Pakai <b>⭐ 5★</b> atau <b>🔍 Scan early</b> — holder on-chain tetap aktif.",
             buttons=menu_buttons(),
             chat_id=chat_id,
         )
@@ -3345,7 +3460,7 @@ def send_scan_candidates(chat_id: str) -> None:
 
 def tg_buttons(row: Dict) -> dict:
     buttons = []
-    fomo = fomo_url(row)
+    fomo = fomo_url(row) if FOMO_API_KEY else ""
     dex = dex_url(row)
     row_btns = []
     if fomo:
@@ -3656,17 +3771,32 @@ def analisa_id(row: Dict) -> str:
             handle = h.get("handle") or "?"
             v = h.get("valueUsd")
             lines.append(f"   @{handle}" + (f" · {_usd(v)}" if v not in (None, "") else ""))
+    else:
+        if not FOMO_API_KEY:
+            lines.append("🔥 FOMO  ⚪ off (limit/key) · pakai holder on-chain")
+        else:
+            lines.append("🔥 FOMO  ⚪ tidak ada smart / board")
+
+    # ringkas sumber holder
+    if row.get("top_holders") or float(row.get("top10_pct") or 0) > 0:
+        src = row.get("sec_provider") or "on-chain"
+        if "sol_rpc" in str(src):
+            lines.append("👥 Holder  Solana RPC top-20")
+        elif "rugcheck" in str(src).lower():
+            lines.append("👥 Holder  RugCheck")
+        elif "goplus" in str(src).lower():
+            lines.append("👥 Holder  GoPlus")
 
     lines.append("──────────────")
     lines.append(f"<code>{row.get('token_address') or '-'}</code>")
     foot = []
     if row.get("url"):
         foot.append(f'<a href="{row["url"]}">DexScreener</a>')
-    if row.get("fomo_url"):
+    if row.get("fomo_url") and FOMO_API_KEY:
         foot.append(f'<a href="{row["fomo_url"]}">FOMO</a>')
     if foot:
         lines.append(" · ".join(foot))
-    lines.append("<i>⚠️ Bukan saran finansial · DYOR</i>")
+    lines.append("<i>⚠️ On-chain prioritised · FOMO opsional · DYOR</i>")
     return "\n".join(lines)
 
 
@@ -3743,10 +3873,12 @@ def process_tg_update(upd: Dict) -> None:
         return
     if text.startswith("/start"):
         send_telegram(
-            "Tempel <b>CA</b> atau tekan menu.\n"
-            "⭐ /stars — setup 5★ ketat\n"
+            "Tempel <b>CA</b> atau tekan menu.\n\n"
+            "⭐ /stars — setup 5★ (on-chain)\n"
             "🔍 /scan — kandidat early\n"
-            "/donasi — USDT",
+            "🔥 /fomo — board sosial (opsional, perlu key)\n"
+            "📊 /stats · ☕ /donasi\n\n"
+            "<i>FOMO off? Tetap scan — RugCheck · GoPlus · GMGN · RPC</i>",
             buttons=menu_buttons(),
             chat_id=str(chat),
         )
@@ -3854,7 +3986,7 @@ def fomo_url(row: Dict) -> str:
 def tg_buttons(row: Dict) -> dict:
     buttons = []
     row_btns = []
-    fomo = fomo_url(row)
+    fomo = fomo_url(row) if FOMO_API_KEY else ""
     dex = dex_url(row)
     if fomo:
         row_btns.append({"text": "⚡️ Trade FOMO", "url": fomo})
@@ -3980,7 +4112,7 @@ def format_alert(row: Dict) -> str:
         body += f"• {pct:.1f}% <code>{_esc(short)}</code>{mark}\n"
     if row.get("lp_locked") is not None:
         body += f"LP lock  {row.get('lp_locked')} {row.get('lp_locked_pct') or ''}%\n"
-    fomo = fomo_url(row)
+    fomo = fomo_url(row) if FOMO_API_KEY else ""
     body += f"Social  {social}\n"
     body += f"Chart   {chart}\n"
     if fomo:
