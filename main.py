@@ -1613,6 +1613,10 @@ GMGN_CHAIN = {
     "bsc": "bsc",
     "bnb": "bsc",
     "base": "base",
+    "arbitrum": "arbitrum",
+    "arb": "arbitrum",
+    "robinhood": "robinhood",
+    "arc": "arc",
 }
 
 
@@ -1682,6 +1686,12 @@ def apply_gmgn_enrich(row: Dict) -> Dict:
     if not isinstance(info, dict):
         info = {}
     row["gmgn_ok"] = True
+    if info.get("symbol") and (not row.get("symbol") or row.get("symbol") in ("?", "UNKNOWN", "")):
+        row["symbol"] = info.get("symbol")
+    if info.get("name") and not row.get("name"):
+        row["name"] = info.get("name")
+    if info.get("logo") and not row.get("icon"):
+        row["icon"] = info.get("logo")
     flags = list(row.get("flags") or [])
 
     burn_status = str(sec.get("burn_status") or "").lower()
@@ -1970,6 +1980,63 @@ def apply_gmgn_enrich(row: Dict) -> Dict:
     row["gmgn_twitter"] = link.get("twitter_username") or ""
     row["gmgn_website"] = link.get("website") or ""
     row["gmgn_telegram"] = link.get("telegram") or ""
+
+    # --- Top holders dari GMGN API ---
+    gmgn_holders_list = []
+    try:
+        th = gmgn_get(
+            "/v1/market/token_top_holders",
+            {"chain": gchain, "address": addr, "limit": 15},
+        )
+        raw_list = []
+        if isinstance(th, dict):
+            raw_list = th.get("list") or th.get("holders") or th.get("data") or []
+            if not raw_list and isinstance(th.get("data"), list):
+                raw_list = th["data"]
+        if isinstance(raw_list, list):
+            for h in raw_list[:12]:
+                if not isinstance(h, dict):
+                    continue
+                waddr = h.get("account_address") or h.get("address") or h.get("wallet") or ""
+                try:
+                    pct = float(h.get("amount_percentage") or h.get("pct") or h.get("percent") or 0)
+                    if 0 < pct <= 1:
+                        pct *= 100
+                except (TypeError, ValueError):
+                    pct = 0.0
+                try:
+                    usd = float(h.get("usd_value") or h.get("usd") or 0)
+                except (TypeError, ValueError):
+                    usd = 0.0
+                tag = str(h.get("addr_type") or h.get("tag") or h.get("exchange") or "")
+                is_lp = any(x in tag.lower() for x in ("pool", "lp", "raydium", "pump", "pair")) or bool(h.get("is_liquidity"))
+                gmgn_holders_list.append({
+                    "address": waddr,
+                    "pct": round(pct, 2),
+                    "usd": round(usd, 2),
+                    "label": "LP" if is_lp else (h.get("exchange") or ""),
+                    "insider": bool(h.get("is_insider") or h.get("insider")),
+                })
+    except Exception as e:
+        print("gmgn top_holders:", e)
+
+    if gmgn_holders_list:
+        row["gmgn_top_holders"] = gmgn_holders_list
+        # isi top_holders bot kalau masih kosong
+        if not row.get("top_holders"):
+            row["top_holders"] = [
+                {"address": h["address"], "pct": h["pct"], "insider": h["insider"], "label": h["label"]}
+                for h in gmgn_holders_list[:8]
+            ]
+            non_lp = [h for h in gmgn_holders_list if h.get("label") != "LP"]
+            if non_lp:
+                row["top1_pct"] = float(non_lp[0]["pct"])
+                row["top10_pct"] = round(sum(float(h["pct"]) for h in non_lp[:10]), 2)
+            row["top1_raw_pct"] = float(gmgn_holders_list[0]["pct"]) if gmgn_holders_list else 0
+            if not row.get("holder_note"):
+                row["holder_note"] = "GMGN top holders"
+            row["sec_provider"] = (row.get("sec_provider") or "") + "+gmgn_holders"
+
     row["gmgn_report"] = {
         "score": score,
         "verdict": gmgn_verdict,
@@ -1999,6 +2066,7 @@ def apply_gmgn_enrich(row: Dict) -> Dict:
         "sells_24h": sells_24,
         "avoid": avoid,
         "avoid_reason": row.get("gmgn_avoid_reason") or "",
+        "top_holders": gmgn_holders_list[:8],
     }
 
     row["flags"] = flags
@@ -2008,6 +2076,302 @@ def apply_gmgn_enrich(row: Dict) -> Dict:
         f"smart={smart_n} sniper={sniper_n} · dev={creator_status or '-'} created={created_count}"
     )
     return row
+
+
+
+def _gmgn_unwrap(data):
+    cur = data
+    for _ in range(4):
+        if isinstance(cur, dict) and "data" in cur and isinstance(cur["data"], (dict, list)):
+            cur = cur["data"]
+        else:
+            break
+    if isinstance(cur, dict) and "rank" in cur:
+        return cur.get("rank") or []
+    if isinstance(cur, list):
+        return cur
+    return []
+
+
+def fetch_gmgn_rank(chain: str = "sol", interval: str = "1h", limit: int = 30) -> List[Dict]:
+    gchain = GMGN_CHAIN.get(chain, chain)
+    raw = gmgn_get(
+        "/v1/market/rank",
+        {
+            "chain": gchain,
+            "interval": interval,
+            "limit": min(50, max(5, limit)),
+            "order_by": "volume",
+            "direction": "desc",
+        },
+    )
+    if isinstance(raw, dict) and raw.get("error"):
+        print("gmgn rank error:", raw.get("error"))
+        return []
+    if isinstance(raw, dict) and "rank" in raw:
+        return raw.get("rank") or []
+    if isinstance(raw, list):
+        return raw
+    return _gmgn_unwrap(raw) if isinstance(raw, dict) else []
+
+
+def gmgn_item_to_row(item: Dict) -> Dict:
+    if not isinstance(item, dict):
+        return {}
+    addr = item.get("address") or ""
+    chain = str(item.get("chain") or "sol").lower()
+    chain_name = {"sol": "SOLANA", "bsc": "BSC", "base": "BASE", "eth": "ETHEREUM"}.get(chain, chain.upper())
+    def _f(k, default=0.0):
+        try:
+            return float(item.get(k) or default)
+        except (TypeError, ValueError):
+            return default
+    mcap, liq, vol = _f("market_cap"), _f("liquidity"), _f("volume")
+    chg = _f("price_change_percent1h") or _f("price_change_percent")
+    chg_5m = _f("price_change_percent5m")
+    open_ts = item.get("open_timestamp") or item.get("creation_timestamp") or 0
+    try:
+        age_h = max(0.0, (time.time() - float(open_ts)) / 3600.0) if open_ts else None
+    except (TypeError, ValueError):
+        age_h = None
+    top10 = _f("top_10_holder_rate")
+    if 0 < top10 <= 1:
+        top10 *= 100
+    bundler = _f("bundler_rate")
+    if bundler <= 1:
+        bundler *= 100
+    rug = _f("rug_ratio")
+    if rug > 1:
+        rug = rug / 100.0
+    smart = int(item.get("smart_degen_count") or 0)
+    sniper = int(item.get("sniper_count") or 0)
+    buys = int(item.get("buys") or 0)
+    sells = int(item.get("sells") or 0)
+    holders = int(item.get("holder_count") or 0)
+    honey = item.get("is_honeypot") in (1, True, "1", "true")
+    burn = str(item.get("burn_status") or "").lower()
+    creator_status = str(item.get("creator_token_status") or "")
+    creator_close = bool(item.get("creator_close"))
+    score = 40
+    notes = []
+    if honey:
+        score = 5
+        notes.append("honeypot")
+    if not honey and mcap and 15_000 <= mcap <= 400_000:
+        score += 15
+        notes.append("mcap early")
+    elif mcap and mcap < 15_000:
+        score += 5
+        notes.append("mcap sangat kecil")
+    elif mcap and mcap > 800_000:
+        score -= 15
+        notes.append("mcap besar")
+    if age_h is not None:
+        if 0.5 <= age_h <= 12:
+            score += 15
+            notes.append("umur fresh")
+        elif 12 < age_h <= 36:
+            score += 8
+            notes.append("umur oke")
+        elif age_h > 48:
+            score -= 12
+            notes.append("sudah tua")
+    if smart >= 3:
+        score += 12
+        notes.append(f"smart {smart}")
+    elif smart >= 1:
+        score += 6
+    if 5 <= chg <= 80:
+        score += 10
+        notes.append("momentum sehat")
+    elif chg > 150:
+        score -= 15
+        notes.append("sudah ledak")
+    elif chg < -20:
+        score -= 8
+        notes.append("dumping")
+    if buys > sells * 1.05 and buys > 50:
+        score += 8
+        notes.append("buy>sell")
+    elif sells > buys * 1.15:
+        score -= 10
+        notes.append("sell pressure")
+    if bundler >= 30:
+        score -= 12
+        notes.append("bundler tinggi")
+    elif bundler < 15:
+        score += 4
+    if rug >= 0.35:
+        score -= 20
+        notes.append(f"rug {rug:.2f}")
+    elif rug < 0.15:
+        score += 5
+    if top10 >= 40:
+        score -= 12
+        notes.append("top10 tinggi")
+    elif 0 < top10 < 25:
+        score += 6
+    if burn in ("burn", "burned"):
+        score += 6
+        notes.append("burn")
+    if creator_close or creator_status == "creator_close":
+        score += 8
+        notes.append("dev close")
+    elif creator_status == "creator_hold":
+        score -= 8
+        notes.append("dev hold")
+    if item.get("is_wash_trading"):
+        score -= 15
+        notes.append("wash")
+    if chg_5m < -25 and chg > 50:
+        score -= 8
+        notes.append("retrace tajam")
+    score = max(0, min(100, int(score)))
+    if score >= 70 and not honey and rug < 0.3:
+        verdict = "GMGN HIDDEN GEM"
+        stars = 5 if score >= 80 else 4
+    elif score >= 55:
+        verdict = "GMGN WATCH"
+        stars = 3
+    else:
+        verdict = "GMGN SKIP"
+        stars = 1
+    return {
+        "symbol": item.get("symbol") or "?",
+        "name": item.get("name") or "",
+        "token_address": addr,
+        "chain": chain_name,
+        "sector": chain_name,
+        "dex": item.get("exchange") or item.get("launchpad") or "",
+        "liquidity_usd": round(liq, 2),
+        "market_cap": round(mcap, 2),
+        "volume_24h": round(vol, 2),
+        "price_change_24h": round(chg, 2),
+        "price_change_5m": round(chg_5m, 2),
+        "age_hours": round(age_h, 2) if age_h is not None else None,
+        "holder_count": holders,
+        "top10_pct": round(top10, 2),
+        "honeypot": honey,
+        "risk": "HONEYPOT" if honey else ("HIGH" if rug >= 0.35 or score < 40 else "LOW"),
+        "creator": item.get("creator") or "",
+        "gmgn_creator_status": creator_status,
+        "gmgn_smart": smart,
+        "gmgn_sniper": sniper,
+        "gmgn_bundler_rate": round(bundler, 1),
+        "gmgn_rug_ratio": rug,
+        "gmgn_buys_24h": buys,
+        "gmgn_sells_24h": sells,
+        "gmgn_score": score,
+        "gmgn_verdict": verdict,
+        "gmgn_notes": notes,
+        "gmgn_stars": stars,
+        "gmgn_ok": True,
+        "burn_status": f"BURN ({burn})" if burn else "BURN UNKNOWN",
+        "lp_status": "LP BURN" if burn in ("burn", "burned") else "LP UNKNOWN",
+        "icon": item.get("logo") or "",
+        "source": "gmgn_rank",
+        "url": f"https://gmgn.ai/{chain}/token/{addr}" if addr else "",
+        "launchpad": item.get("launchpad") or item.get("launchpad_platform") or "",
+        "score": score,
+        "confidence": min(95, 40 + score // 2),
+        "upside": "HIGH ROOM" if mcap and mcap < 250_000 and score >= 60 else ("SPECULATIVE" if score >= 50 else "LIMITED"),
+        "verdict": verdict,
+    }
+
+
+def find_gmgn_hidden_gems(
+    chains=None,
+    interval: str = "1h",
+    limit: int = 10,
+    min_score: int = 55,
+) -> List[Dict]:
+    chains = chains or ["sol", "bsc", "base"]
+    seen = set()
+    all_rows: List[Dict] = []
+    for ch in chains:
+        try:
+            items = fetch_gmgn_rank(ch, interval=interval, limit=25)
+            time.sleep(0.35)
+            for it in items:
+                row = gmgn_item_to_row(it)
+                addr = (row.get("token_address") or "").lower()
+                if not addr or addr in seen:
+                    continue
+                seen.add(addr)
+                if int(row.get("gmgn_score") or 0) >= min_score and not row.get("honeypot"):
+                    all_rows.append(row)
+        except Exception as e:
+            print("gmgn gems chain", ch, e)
+    all_rows.sort(key=lambda x: (int(x.get("gmgn_score") or 0), int(x.get("gmgn_smart") or 0)), reverse=True)
+    return all_rows[:limit]
+
+
+@app.get("/scan/gmgn-gems")
+def scan_gmgn_gems(
+    limit: int = Query(10, ge=1, le=30),
+    chain: str = Query("sol"),
+    interval: str = Query("1h"),
+    min_score: int = Query(55, ge=0, le=100),
+):
+    """Hidden gem dari GMGN rank — indikator potensi naik (bukan jaminan)."""
+    chains = [c.strip() for c in chain.split(",") if c.strip()] or ["sol"]
+    rows = find_gmgn_hidden_gems(chains=chains, interval=interval, limit=limit, min_score=min_score)
+    return {
+        "ok": True,
+        "count": len(rows),
+        "interval": interval,
+        "min_score": min_score,
+        "chains": chains,
+        "items": rows,
+        "hint": "Skor >=70 HIDDEN GEM · 55-69 WATCH · <55 SKIP. Bukan jaminan naik.",
+    }
+
+
+@app.get("/scan/gmgn")
+def scan_gmgn(address: str = Query(..., min_length=8), chain: str = Query("solana")):
+    """Analisa token pure dari GMGN OpenAPI (info + security + top holders)."""
+    row = {
+        "token_address": address.strip(),
+        "chain": chain.strip().lower() or "solana",
+        "sector": (chain.strip() or "solana").upper(),
+        "symbol": "?",
+        "name": "",
+    }
+    apply_gmgn_enrich(row)
+    if row.get("gmgn_error") and not row.get("gmgn_ok"):
+        return {"ok": False, "error": row.get("gmgn_error"), "address": address, "chain": chain}
+    # symbol dari info sudah di apply via side effects? info was used but symbol may not be set
+    return {
+        "ok": True,
+        "address": address,
+        "chain": row.get("chain"),
+        "gmgn_ok": row.get("gmgn_ok"),
+        "gmgn_verdict": row.get("gmgn_verdict"),
+        "gmgn_score": row.get("gmgn_score"),
+        "gmgn_notes": row.get("gmgn_notes"),
+        "gmgn_report": row.get("gmgn_report"),
+        "lp_status": row.get("lp_status"),
+        "burn_status": row.get("burn_status"),
+        "buyback_status": row.get("buyback_status"),
+        "creator": row.get("gmgn_creator") or row.get("creator"),
+        "gmgn_creator_status": row.get("gmgn_creator_status"),
+        "gmgn_creator_hold_pct": row.get("gmgn_creator_hold_pct"),
+        "gmgn_creator_created_count": row.get("gmgn_creator_created_count"),
+        "gmgn_smart": row.get("gmgn_smart"),
+        "gmgn_sniper": row.get("gmgn_sniper"),
+        "gmgn_bundler": row.get("gmgn_bundler"),
+        "gmgn_renowned": row.get("gmgn_renowned"),
+        "gmgn_fresh": row.get("gmgn_fresh"),
+        "gmgn_chg": row.get("gmgn_chg"),
+        "gmgn_buys_24h": row.get("gmgn_buys_24h"),
+        "gmgn_sells_24h": row.get("gmgn_sells_24h"),
+        "gmgn_top_holders": row.get("gmgn_top_holders") or [],
+        "top_holders": row.get("top_holders") or [],
+        "honeypot": row.get("honeypot"),
+        "risk": row.get("risk"),
+        "gmgn_avoid": row.get("gmgn_avoid"),
+        "gmgn_avoid_reason": row.get("gmgn_avoid_reason"),
+    }
 
 
 def is_dev_rug_risk(row: Dict) -> bool:
@@ -3187,10 +3551,61 @@ def donate_text() -> str:
 def menu_buttons() -> dict:
     return {"inline_keyboard": [
         [{"text": "⭐ Setup 5★", "callback_data": "stars5"}, {"text": "🔍 Scan early", "callback_data": "scan"}],
-        [{"text": "🚀 Yodao Pump", "callback_data": "yodao"}, {"text": "🔥 FOMO Board", "callback_data": "fomo"}],
-        [{"text": "📊 Statistik signal", "callback_data": "stats"}],
+        [{"text": "🦞 GMGN Gems", "callback_data": "gmgn"}, {"text": "🚀 Yodao", "callback_data": "yodao"}],
+        [{"text": "🔥 FOMO Board", "callback_data": "fomo"}, {"text": "📊 Stats", "callback_data": "stats"}],
         [{"text": "☕ Donasi USDT", "callback_data": "donasi"}],
     ]}
+
+
+def send_gmgn_gems(chat_id: str) -> None:
+    send_telegram(
+        "🦞 Scan <b>GMGN Hidden Gems</b>…\n"
+        "Filter: mcap early · smart wallet · belum ledak · rug rendah",
+        chat_id=chat_id,
+    )
+    try:
+        rows = find_gmgn_hidden_gems(chains=["sol", "bsc", "base"], interval="1h", limit=8, min_score=55)
+    except Exception as e:
+        send_telegram(f"GMGN gems gagal: {e}", buttons=menu_buttons(), chat_id=chat_id)
+        return
+    if not rows:
+        send_telegram(
+            "🦞 <b>Belum ada gem GMGN</b> lolos filter sekarang.\n"
+            "Coba lagi nanti / rate limit free tier.",
+            buttons=menu_buttons(),
+            chat_id=chat_id,
+        )
+        return
+    lines = [
+        f"🦞 <b>GMGN HIDDEN GEMS</b> · {len(rows)} token",
+        "Indikator: skor · smart · mcap · umur · buy/sell · rug",
+        "",
+    ]
+    kb = []
+    for i, row in enumerate(rows, 1):
+        addr = row.get("token_address") or ""
+        stars = "★" * int(row.get("gmgn_stars") or 1) + "☆" * (5 - int(row.get("gmgn_stars") or 1))
+        lines.append(
+            f"<b>{i}. ${row.get('symbol')}</b> · {row.get('chain')} · {stars}"
+        )
+        lines.append(
+            f"{row.get('gmgn_verdict')} · skor <b>{row.get('gmgn_score')}</b> · "
+            f"smart {row.get('gmgn_smart') or 0}"
+        )
+        lines.append(
+            f"🏦 {_usd(row.get('market_cap'))} · 💧 {_usd(row.get('liquidity_usd'))} · "
+            f"📈 {float(row.get('price_change_24h') or 0):+.0f}% · ⏱ {row.get('age_hours') or '-'}j"
+        )
+        notes = row.get("gmgn_notes") or []
+        if notes:
+            lines.append("· " + " · ".join(str(n) for n in notes[:4]))
+        lines.append(f"<code>{addr}</code>")
+        lines.append("")
+        if addr:
+            kb.append([{"text": f"🔬 Analisa ${row.get('symbol') or i}", "callback_data": "ca:" + addr[:60]}])
+    kb.append([{"text": "🦞 GMGN lagi", "callback_data": "gmgn"}])
+    kb.append([{"text": "⭐ Setup 5★", "callback_data": "stars5"}])
+    send_telegram("\n".join(lines).strip(), buttons={"inline_keyboard": kb}, chat_id=chat_id)
 
 
 def is_five_star_setup(row: Dict) -> bool:
@@ -3745,6 +4160,16 @@ def analisa_id(row: Dict) -> str:
             lines.append("   " + " · ".join(ren_s))
         if row.get("gmgn_notes"):
             lines.append("   " + " · ".join(str(x) for x in (row.get("gmgn_notes") or [])[:5]))
+        gth = row.get("gmgn_top_holders") or []
+        if gth:
+            lines.append("   Top holders GMGN:")
+            for h in gth[:4]:
+                short = h.get("address") or ""
+                if len(short) > 12:
+                    short = short[:4] + "…" + short[-4:]
+                lab = f" · {h['label']}" if h.get("label") else ""
+                usd = f" · {_usd(h.get('usd'))}" if h.get("usd") else ""
+                lines.append(f"   · {h.get('pct', 0):.1f}% <code>{short}</code>{lab}{usd}")
         if row.get("gmgn_avoid"):
             lines.append(f"🚨 <b>HINDARI</b> {row.get('gmgn_avoid_reason') or 'dev rug'}")
         elif cstat == "creator_close":
@@ -3856,6 +4281,8 @@ def process_tg_update(upd: Dict) -> None:
             send_five_star_candidates(str(chat))
         elif data == "scan":
             send_scan_candidates(str(chat))
+        elif data == "gmgn":
+            send_gmgn_gems(str(chat))
         elif data == "yodao":
             send_yodao_candidates(str(chat))
         elif data == "fomo":
@@ -3896,6 +4323,9 @@ def process_tg_update(upd: Dict) -> None:
         return
     if text.startswith("/scan") or text.lower() == "scan":
         send_scan_candidates(str(chat))
+        return
+    if text.startswith("/gmgn") or text.lower() in ("gmgn", "gems", "hiddengem"):
+        send_gmgn_gems(str(chat))
         return
     if text.startswith("/yodao") or text.lower() in ("yodao", "pump"):
         send_yodao_candidates(str(chat))
