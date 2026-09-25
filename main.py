@@ -2152,87 +2152,120 @@ def gmgn_item_to_row(item: Dict) -> Dict:
     burn = str(item.get("burn_status") or "").lower()
     creator_status = str(item.get("creator_token_status") or "")
     creator_close = bool(item.get("creator_close"))
-    score = 40
-    notes = []
+    # --- HARD GATE: tidak boleh HIDDEN GEM ---
+    hard_skip = False
+    hard_notes = []
     if honey:
-        score = 5
-        notes.append("honeypot")
-    if not honey and mcap and 15_000 <= mcap <= 400_000:
-        score += 15
-        notes.append("mcap early")
-    elif mcap and mcap < 15_000:
-        score += 5
-        notes.append("mcap sangat kecil")
-    elif mcap and mcap > 800_000:
-        score -= 15
-        notes.append("mcap besar")
-    if age_h is not None:
-        if 0.5 <= age_h <= 12:
-            score += 15
-            notes.append("umur fresh")
-        elif 12 < age_h <= 36:
-            score += 8
-            notes.append("umur oke")
-        elif age_h > 48:
-            score -= 12
-            notes.append("sudah tua")
-    if smart >= 3:
-        score += 12
-        notes.append(f"smart {smart}")
-    elif smart >= 1:
-        score += 6
-    if 5 <= chg <= 80:
-        score += 10
-        notes.append("momentum sehat")
-    elif chg > 150:
-        score -= 15
-        notes.append("sudah ledak")
-    elif chg < -20:
-        score -= 8
-        notes.append("dumping")
-    if buys > sells * 1.05 and buys > 50:
-        score += 8
-        notes.append("buy>sell")
-    elif sells > buys * 1.15:
-        score -= 10
-        notes.append("sell pressure")
-    if bundler >= 30:
-        score -= 12
-        notes.append("bundler tinggi")
-    elif bundler < 15:
-        score += 4
-    if rug >= 0.35:
-        score -= 20
-        notes.append(f"rug {rug:.2f}")
-    elif rug < 0.15:
-        score += 5
-    if top10 >= 40:
-        score -= 12
-        notes.append("top10 tinggi")
-    elif 0 < top10 < 25:
-        score += 6
-    if burn in ("burn", "burned"):
-        score += 6
-        notes.append("burn")
-    if creator_close or creator_status == "creator_close":
-        score += 8
-        notes.append("dev close")
-    elif creator_status == "creator_hold":
-        score -= 8
-        notes.append("dev hold")
+        hard_skip = True
+        hard_notes.append("honeypot")
+    if chg <= -15:
+        hard_skip = True
+        hard_notes.append("dumping")
+    if chg >= 90:
+        hard_skip = True
+        hard_notes.append("sudah ledak")
+    if chg_5m <= -20:
+        hard_skip = True
+        hard_notes.append("5m dump")
+    if age_h is not None and age_h > 24:
+        hard_skip = True
+        hard_notes.append("umur >24j")
+    if mcap and mcap > 450_000:
+        hard_skip = True
+        hard_notes.append("mcap besar")
+    if rug >= 0.3:
+        hard_skip = True
+        hard_notes.append(f"rug {rug:.2f}")
     if item.get("is_wash_trading"):
-        score -= 15
-        notes.append("wash")
-    if chg_5m < -25 and chg > 50:
-        score -= 8
-        notes.append("retrace tajam")
+        hard_skip = True
+        hard_notes.append("wash")
+    if sells > buys * 1.25 and sells > 80:
+        hard_skip = True
+        hard_notes.append("sell pressure")
+
+    score = 40
+    notes = list(hard_notes)
+    if hard_skip:
+        score = min(45, 30 + smart // 10)  # max WATCH lemah / SKIP
+    else:
+        if mcap and 20_000 <= mcap <= 350_000:
+            score += 18
+            notes.append("mcap early")
+        elif mcap and 8_000 <= mcap < 20_000:
+            score += 10
+            notes.append("mcap kecil")
+        elif mcap and mcap < 8_000:
+            score -= 5
+            notes.append("liq/mcap terlalu tipis")
+        if age_h is not None:
+            if 0.3 <= age_h <= 8:
+                score += 16
+                notes.append("umur fresh")
+            elif 8 < age_h <= 18:
+                score += 8
+                notes.append("umur oke")
+        if smart >= 5:
+            score += 10
+            notes.append(f"smart {smart}")
+        elif smart >= 1:
+            score += 5
+            notes.append(f"smart {smart}")
+        # momentum ideal: naik pelan, belum FOMO
+        if 3 <= chg <= 55:
+            score += 14
+            notes.append("momentum sehat")
+        elif 55 < chg < 90:
+            score += 4
+            notes.append("momentum tinggi")
+        elif -10 <= chg < 3:
+            score += 2
+            notes.append("masih flat")
+        if buys > sells * 1.08 and buys > 40:
+            score += 10
+            notes.append("buy>sell")
+        if bundler >= 25:
+            score -= 14
+            notes.append("bundler tinggi")
+        elif bundler < 12:
+            score += 4
+        if rug < 0.12:
+            score += 6
+        if 0 < top10 < 22:
+            score += 6
+        elif top10 >= 35:
+            score -= 10
+            notes.append("top10 tinggi")
+        if burn in ("burn", "burned"):
+            score += 6
+            notes.append("burn")
+        if creator_close or creator_status == "creator_close":
+            score += 8
+            notes.append("dev close")
+        elif creator_status == "creator_hold":
+            score -= 10
+            notes.append("dev hold")
+
     score = max(0, min(100, int(score)))
-    if score >= 70 and not honey and rug < 0.3:
+
+    # HIDDEN GEM hanya jika lolos hard gate + skor tinggi + belum ledak/dump
+    can_gem = (
+        not hard_skip
+        and not honey
+        and rug < 0.25
+        and chg < 90
+        and chg > -10
+        and (age_h is None or age_h <= 24)
+        and (not mcap or mcap <= 450_000)
+    )
+    if can_gem and score >= 72:
         verdict = "GMGN HIDDEN GEM"
-        stars = 5 if score >= 80 else 4
-    elif score >= 55:
+        stars = 5 if score >= 82 else 4
+    elif can_gem and score >= 58:
         verdict = "GMGN WATCH"
         stars = 3
+    elif score >= 50 and not honey:
+        verdict = "GMGN WATCH"
+        stars = 2
     else:
         verdict = "GMGN SKIP"
         stars = 1
@@ -2298,8 +2331,10 @@ def find_gmgn_hidden_gems(
                 if not addr or addr in seen:
                     continue
                 seen.add(addr)
-                if int(row.get("gmgn_score") or 0) >= min_score and not row.get("honeypot"):
-                    all_rows.append(row)
+                # hanya kirim HIDDEN GEM / WATCH — buang SKIP & yang hard-gate
+                if row.get("gmgn_verdict") in ("GMGN HIDDEN GEM", "GMGN WATCH") and not row.get("honeypot"):
+                    if int(row.get("gmgn_score") or 0) >= min_score:
+                        all_rows.append(row)
         except Exception as e:
             print("gmgn gems chain", ch, e)
     all_rows.sort(key=lambda x: (int(x.get("gmgn_score") or 0), int(x.get("gmgn_smart") or 0)), reverse=True)
